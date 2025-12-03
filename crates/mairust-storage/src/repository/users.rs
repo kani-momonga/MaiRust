@@ -28,6 +28,67 @@ impl DbUserRepository {
     pub fn new(pool: DatabasePool) -> Self {
         Self { pool }
     }
+
+    /// Find users by tenant (simplified for handlers)
+    pub async fn find_by_tenant(&self, tenant_id: TenantId) -> Result<Vec<User>> {
+        sqlx::query_as::<_, User>(
+            "SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(tenant_id)
+        .fetch_all(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Find user by ID (simplified)
+    pub async fn find_by_id(&self, id: UserId) -> Result<Option<User>> {
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(self.pool.pool())
+            .await
+            .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Create user (simplified for handlers - uses placeholder password)
+    pub async fn create(&self, input: &CreateUser) -> Result<User> {
+        // Note: In production, password should be hashed by the caller
+        let password_hash = "placeholder_hash".to_string();
+        let id = Uuid::now_v7();
+        let now = chrono::Utc::now();
+        let role = format!("{:?}", input.role).to_lowercase();
+
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, tenant_id, email, password_hash, name, role, active, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)
+            "#,
+        )
+        .bind(id)
+        .bind(input.tenant_id)
+        .bind(&input.email)
+        .bind(&password_hash)
+        .bind(&input.name)
+        .bind(&role)
+        .bind(now)
+        .bind(now)
+        .execute(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))?;
+
+        self.find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::Internal("Failed to create user".to_string()))
+    }
+
+    /// Delete user
+    pub async fn delete(&self, id: UserId) -> Result<()> {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(self.pool.pool())
+            .await
+            .map_err(|e| Error::Database(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[async_trait]

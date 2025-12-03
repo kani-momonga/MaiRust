@@ -44,6 +44,24 @@ impl DbHookRepository {
     pub fn new(pool: DatabasePool) -> Self {
         Self { pool }
     }
+
+    /// Find hooks by tenant and type (for hook manager)
+    pub async fn find_by_tenant_and_type(&self, tenant_id: TenantId, hook_type: &str) -> Result<Vec<Hook>> {
+        sqlx::query_as::<_, Hook>(
+            r#"
+            SELECT * FROM hooks
+            WHERE (tenant_id = $1 OR tenant_id IS NULL)
+            AND hook_type = $2
+            AND enabled = true
+            ORDER BY priority ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(hook_type)
+        .fetch_all(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
+    }
 }
 
 #[async_trait]

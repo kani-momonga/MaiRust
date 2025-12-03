@@ -7,9 +7,10 @@ pub mod mailboxes;
 pub mod domains;
 pub mod hooks;
 
-pub use messages::MessageRepository;
-pub use tenants::TenantRepository;
-pub use users::UserRepository;
-pub use mailboxes::MailboxRepository;
-pub use domains::DomainRepository;
-pub use hooks::HookRepository;
+// Re-export concrete repository implementations with simple names
+pub use messages::DbMessageRepository as MessageRepository;
+pub use tenants::DbTenantRepository as TenantRepository;
+pub use users::DbUserRepository as UserRepository;
+pub use mailboxes::DbMailboxRepository as MailboxRepository;
+pub use domains::DbDomainRepository as DomainRepository;
+pub use hooks::DbHookRepository as HookRepository;

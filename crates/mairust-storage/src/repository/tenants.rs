@@ -27,6 +27,66 @@ impl DbTenantRepository {
     pub fn new(pool: DatabasePool) -> Self {
         Self { pool }
     }
+
+    /// Find all tenants (simplified for handlers)
+    pub async fn find_all(&self) -> Result<Vec<Tenant>> {
+        sqlx::query_as::<_, Tenant>(
+            "SELECT * FROM tenants WHERE status != 'deleted' ORDER BY created_at DESC",
+        )
+        .fetch_all(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Find tenant by ID (alias for get)
+    pub async fn find_by_id(&self, id: TenantId) -> Result<Option<Tenant>> {
+        sqlx::query_as::<_, Tenant>("SELECT * FROM tenants WHERE id = $1 AND status != 'deleted'")
+            .bind(id)
+            .fetch_optional(self.pool.pool())
+            .await
+            .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Create a tenant (simplified for handlers)
+    pub async fn create(&self, input: &CreateTenant) -> Result<Tenant> {
+        let id = Uuid::now_v7();
+        let now = chrono::Utc::now();
+        let settings = input.settings.clone().unwrap_or(serde_json::json!({}));
+        let plan = input.plan.clone().unwrap_or_else(|| "free".to_string());
+
+        sqlx::query(
+            r#"
+            INSERT INTO tenants (id, name, slug, status, plan, settings, created_at, updated_at)
+            VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
+            "#,
+        )
+        .bind(id)
+        .bind(&input.name)
+        .bind(&input.slug)
+        .bind(&plan)
+        .bind(&settings)
+        .bind(now)
+        .bind(now)
+        .execute(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))?;
+
+        self.find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::Internal("Failed to create tenant".to_string()))
+    }
+
+    /// Delete tenant (soft delete)
+    pub async fn delete(&self, id: TenantId) -> Result<()> {
+        let now = chrono::Utc::now();
+        sqlx::query("UPDATE tenants SET status = 'deleted', updated_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(now)
+            .execute(self.pool.pool())
+            .await
+            .map_err(|e| Error::Database(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[async_trait]

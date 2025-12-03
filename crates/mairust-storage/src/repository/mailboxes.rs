@@ -30,6 +30,15 @@ impl DbMailboxRepository {
     pub fn new(pool: DatabasePool) -> Self {
         Self { pool }
     }
+
+    /// Find mailbox by address (for SMTP handler)
+    pub async fn find_by_address(&self, address: &str) -> Result<Option<Mailbox>> {
+        sqlx::query_as::<_, Mailbox>("SELECT * FROM mailboxes WHERE address = $1")
+            .bind(address)
+            .fetch_optional(self.pool.pool())
+            .await
+            .map_err(|e| Error::Database(e.to_string()))
+    }
 }
 
 #[async_trait]

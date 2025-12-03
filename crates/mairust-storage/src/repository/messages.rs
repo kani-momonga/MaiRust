@@ -68,6 +68,135 @@ impl DbMessageRepository {
     pub fn new(pool: DatabasePool) -> Self {
         Self { pool }
     }
+
+    /// Find a message by ID (alias for get)
+    pub async fn find_by_id(&self, id: MessageId) -> Result<Option<Message>> {
+        sqlx::query_as::<_, Message>(
+            "SELECT * FROM messages WHERE id = $1 AND deleted = false",
+        )
+        .bind(id)
+        .fetch_optional(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Find messages by mailbox (simplified version for handlers)
+    pub async fn find_by_mailbox(&self, mailbox_id: MailboxId, limit: usize) -> Result<Vec<Message>> {
+        sqlx::query_as::<_, Message>(
+            r#"
+            SELECT * FROM messages
+            WHERE mailbox_id = $1 AND deleted = false
+            ORDER BY received_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(mailbox_id)
+        .bind(limit as i64)
+        .fetch_all(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Create a message directly from Message struct
+    pub async fn create(&self, message: &Message) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO messages (
+                id, tenant_id, mailbox_id, message_id_header, subject,
+                from_address, to_addresses, cc_addresses, headers, body_preview,
+                body_size, has_attachments, storage_path, seen, answered,
+                flagged, deleted, draft, spam_score, tags, metadata, received_at, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+            )
+            "#,
+        )
+        .bind(message.id)
+        .bind(message.tenant_id)
+        .bind(message.mailbox_id)
+        .bind(&message.message_id_header)
+        .bind(&message.subject)
+        .bind(&message.from_address)
+        .bind(&message.to_addresses)
+        .bind(&message.cc_addresses)
+        .bind(&message.headers)
+        .bind(&message.body_preview)
+        .bind(message.body_size)
+        .bind(message.has_attachments)
+        .bind(&message.storage_path)
+        .bind(message.seen)
+        .bind(message.answered)
+        .bind(message.flagged)
+        .bind(message.deleted)
+        .bind(message.draft)
+        .bind(message.spam_score)
+        .bind(&message.tags)
+        .bind(&message.metadata)
+        .bind(message.received_at)
+        .bind(message.created_at)
+        .execute(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Update flags (simplified for handlers)
+    pub async fn update_flags(
+        &self,
+        id: MessageId,
+        seen: Option<bool>,
+        answered: Option<bool>,
+        flagged: Option<bool>,
+        deleted: Option<bool>,
+    ) -> Result<()> {
+        let mut updates = vec!["updated_at = NOW()".to_string()];
+        let mut idx = 2;
+
+        if seen.is_some() {
+            updates.push(format!("seen = ${}", idx));
+            idx += 1;
+        }
+        if answered.is_some() {
+            updates.push(format!("answered = ${}", idx));
+            idx += 1;
+        }
+        if flagged.is_some() {
+            updates.push(format!("flagged = ${}", idx));
+            idx += 1;
+        }
+        if deleted.is_some() {
+            updates.push(format!("deleted = ${}", idx));
+        }
+
+        let query = format!("UPDATE messages SET {} WHERE id = $1", updates.join(", "));
+        let mut q = sqlx::query(&query).bind(id);
+
+        if let Some(v) = seen {
+            q = q.bind(v);
+        }
+        if let Some(v) = answered {
+            q = q.bind(v);
+        }
+        if let Some(v) = flagged {
+            q = q.bind(v);
+        }
+        if let Some(v) = deleted {
+            q = q.bind(v);
+        }
+
+        q.execute(self.pool.pool())
+            .await
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Delete a message (soft delete)
+    pub async fn delete(&self, id: MessageId) -> Result<()> {
+        self.update_flags(id, None, None, None, Some(true)).await
+    }
 }
 
 #[async_trait]
@@ -284,9 +413,8 @@ impl MessageRepository for DbMessageRepository {
         Ok(())
     }
 
-    async fn delete(&self, tenant_id: TenantId, id: MessageId) -> Result<()> {
-        self.update_flags(tenant_id, id, None, None, None, Some(true))
-            .await
+    async fn delete(&self, _tenant_id: TenantId, id: MessageId) -> Result<()> {
+        DbMessageRepository::update_flags(self, id, None, None, None, Some(true)).await
     }
 
     async fn count(&self, tenant_id: TenantId, mailbox_id: MailboxId) -> Result<i64> {

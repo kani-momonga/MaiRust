@@ -52,6 +52,9 @@ prometheus = { workspace = true }
 # Async trait
 async-trait = "0.1"
 
+# Database (for queue and hooks)
+sqlx = { workspace = true }
+
 # DNS (for SPF/DKIM/DMARC)
 trust-dns-resolver = "0.23"
 

@@ -26,6 +26,7 @@ pub struct DeliveryJob {
 pub struct QueueManager<S: FileStorage> {
     db_pool: DatabasePool,
     file_storage: Arc<S>,
+    #[allow(dead_code)]
     hook_manager: Arc<HookManager>,
 }
 

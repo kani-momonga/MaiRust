@@ -1631,6 +1631,7 @@ dependencies = [
  "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls 0.25.0",

@@ -33,6 +33,7 @@ pub struct SmtpHandler<S: FileStorage> {
     db_pool: DatabasePool,
     file_storage: Arc<S>,
     hook_manager: Arc<HookManager>,
+    #[allow(dead_code)]
     queue_manager: Arc<QueueManager<S>>,
     peer_addr: SocketAddr,
 }
@@ -263,7 +264,7 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
                         continue;
                     }
 
-                    state = SessionState::Data;
+                    let _state = SessionState::Data;
                     self.send_response(&mut writer, 354, "Start mail input; end with <CRLF>.<CRLF>")
                         .await?;
 

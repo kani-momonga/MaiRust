@@ -28,6 +28,15 @@ impl DbDomainRepository {
     pub fn new(pool: DatabasePool) -> Self {
         Self { pool }
     }
+
+    /// Find domain by name (for SMTP handler)
+    pub async fn find_by_name(&self, name: &str) -> Result<Option<Domain>> {
+        sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE name = $1")
+            .bind(name)
+            .fetch_optional(self.pool.pool())
+            .await
+            .map_err(|e| Error::Database(e.to_string()))
+    }
 }
 
 #[async_trait]
