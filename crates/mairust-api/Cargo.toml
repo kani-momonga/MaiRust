@@ -1,0 +1,53 @@
+[package]
+name = "mairust-api"
+description = "REST API server for MaiRust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mairust-common = { workspace = true }
+mairust-storage = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# HTTP / API
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# UUID & Time
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Authentication
+argon2 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+
+# Metrics
+prometheus = { workspace = true }
+
+# Async trait
+async-trait = "0.1"
+
+# OpenAPI
+utoipa = { version = "4", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "6", features = ["axum"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+axum-test = "14"

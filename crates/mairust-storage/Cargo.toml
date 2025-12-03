@@ -1,0 +1,38 @@
+[package]
+name = "mairust-storage"
+description = "Storage abstraction layer for MaiRust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mairust-common = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# UUID & Time
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Async trait
+async-trait = "0.1"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3.10"

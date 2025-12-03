@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mairust-common",
+    "crates/mairust-storage",
+    "crates/mairust-core",
+    "crates/mairust-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["MaiRust Contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/example/mairust"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-rustls = "0.25"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Configuration
+config = "0.14"
+
+# Logging & Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono", "json"] }
+
+# UUID
+uuid = { version = "1.6", features = ["v4", "v7", "serde"] }
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP / API
+axum = { version = "0.7", features = ["macros"] }
+tower = { version = "0.4", features = ["util", "timeout", "limit"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-gzip"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+# SMTP
+mailin-embedded = "0.8"
+mail-parser = "0.9"
+mail-builder = "0.3"
+
+# Crypto
+argon2 = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
+rustls = "0.22"
+rustls-pemfile = "2.0"
+
+# Metrics
+prometheus = "0.13"
+
+# Testing
+pretty_assertions = "1.4"
+wiremock = "0.5"
+
+# Internal crates
+mairust-common = { path = "crates/mairust-common" }
+mairust-storage = { path = "crates/mairust-storage" }
+mairust-core = { path = "crates/mairust-core" }
+mairust-api = { path = "crates/mairust-api" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

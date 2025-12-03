@@ -1,0 +1,58 @@
+# MaiRust Configuration Example
+# Copy this file to config.toml and modify as needed
+
+[server]
+hostname = "mail.example.com"
+bind_address = "0.0.0.0"
+
+[database]
+# Backend: "postgres" or "sqlite"
+backend = "postgres"
+# PostgreSQL connection URL
+url = "postgres://mairust:password@localhost:5432/mairust"
+# For SQLite:
+# backend = "sqlite"
+# path = "./data/mairust.db"
+max_connections = 20
+min_connections = 5
+
+[storage]
+# Backend: "fs" or "s3"
+backend = "fs"
+# Local filesystem path
+path = "/var/lib/mairust/mail"
+
+# S3 configuration (if backend = "s3")
+# [storage.s3]
+# bucket = "mairust-mail"
+# region = "us-east-1"
+# endpoint = "https://s3.amazonaws.com"  # Optional, for MinIO etc.
+# access_key_id = "YOUR_ACCESS_KEY"      # Optional, uses AWS credentials chain if not set
+# secret_access_key = "YOUR_SECRET_KEY"
+
+[smtp]
+hostname = "mail.example.com"
+host = "0.0.0.0"
+port = 25
+submission_port = 587
+max_message_size = 26214400  # 25 MB
+max_recipients = 100
+max_connections = 100
+connection_timeout_secs = 300
+tls_enabled = false
+auth_required = false
+require_tls_for_auth = true
+
+[api]
+port = 8080
+enable_swagger = true
+cors_origins = ["http://localhost:3000"]
+
+[logging]
+level = "info"
+format = "json"
+
+# TLS configuration (optional)
+# [tls]
+# cert_path = "/etc/mairust/tls/cert.pem"
+# key_path = "/etc/mairust/tls/key.pem"
