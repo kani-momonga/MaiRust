@@ -48,21 +48,22 @@ async fn main() -> Result<()> {
     };
 
     // Initialize and start SMTP server
-    let smtp_server = SmtpServer::new(
+    let smtp_server = Arc::new(SmtpServer::new(
         config.smtp.clone(),
         db_pool.clone(),
         file_storage.clone(),
         hook_manager.clone(),
         queue_manager.clone(),
-    );
+    ));
 
     info!(
-        "Starting SMTP server on {}:{}",
-        config.smtp.host, config.smtp.port
+        "Starting SMTP server on {}:{} (SMTP) and {}:{} (Submission)",
+        config.smtp.host, config.smtp.port,
+        config.smtp.host, config.smtp.submission_port
     );
 
-    // Run SMTP server (blocking)
-    smtp_server.run().await?;
+    // Run SMTP server with both ports (blocking)
+    smtp_server.run_dual_port().await?;
 
     // Cleanup
     queue_handle.abort();
