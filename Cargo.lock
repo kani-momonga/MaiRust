@@ -1695,6 +1695,7 @@ dependencies = [
  "mairust-storage",
  "pretty_assertions",
  "prometheus",
+ "regex",
  "reqwest",
  "rsa",
  "rustls 0.22.4",
