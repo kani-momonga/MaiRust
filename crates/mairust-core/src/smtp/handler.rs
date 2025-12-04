@@ -1,5 +1,8 @@
 //! SMTP session handler
 
+use crate::email_auth::{
+    dkim::DkimVerifier, dmarc::DmarcVerifier, spf::SpfVerifier, AuthenticationResult,
+};
 use crate::hooks::HookManager;
 use crate::queue::QueueManager;
 use crate::smtp::auth::{login_challenge_password, login_challenge_username, SmtpAuthenticator};
@@ -636,6 +639,9 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
         });
         let message_id_header = parsed.message_id().map(|s| s.to_string());
 
+        // Perform email authentication checks
+        let auth_result = self.verify_email_authentication(envelope, data).await;
+
         // Get body preview
         let body_preview = parsed
             .body_text(0)
@@ -684,7 +690,12 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
                 draft: false,
                 spam_score: None,
                 tags: serde_json::json!([]),
-                metadata: serde_json::json!({}),
+                metadata: serde_json::json!({
+                    "spf": auth_result.spf.as_header_value(),
+                    "dkim": auth_result.dkim.as_header_value(),
+                    "dmarc": auth_result.dmarc.as_header_value(),
+                    "auth_results_header": auth_result.to_header(&self.config.hostname)
+                }),
                 received_at: Utc::now(),
                 created_at: Utc::now(),
             };
@@ -704,6 +715,130 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
         }
 
         Ok(message_id)
+    }
+
+    /// Verify email authentication (SPF, DKIM, DMARC)
+    async fn verify_email_authentication(
+        &self,
+        envelope: &Envelope,
+        message_data: &[u8],
+    ) -> AuthenticationResult {
+        use crate::email_auth::{DkimResult, DmarcResult, SpfResult};
+
+        // Get client IP and mail from address
+        let client_ip = match &envelope.client_ip {
+            Some(ip) => ip.parse().ok(),
+            None => Some(self.peer_addr.ip()),
+        };
+
+        let mail_from = envelope
+            .from
+            .as_ref()
+            .map(|addr| addr.to_string())
+            .unwrap_or_default();
+
+        // Extract From header domain for DMARC
+        let from_domain = self.extract_from_domain(message_data);
+
+        // SPF verification
+        let spf_result = if let Some(ip) = client_ip {
+            match SpfVerifier::new().await {
+                Ok(verifier) => verifier.verify(&mail_from, ip).await,
+                Err(e) => {
+                    warn!("Failed to create SPF verifier: {}", e);
+                    SpfResult::TempError
+                }
+            }
+        } else {
+            SpfResult::None
+        };
+
+        info!(
+            "SPF result for {} from {}: {:?}",
+            mail_from, self.peer_addr, spf_result
+        );
+
+        // DKIM verification
+        let dkim_result = match DkimVerifier::new().await {
+            Ok(verifier) => verifier.verify(message_data).await,
+            Err(e) => {
+                warn!("Failed to create DKIM verifier: {}", e);
+                DkimResult::TempError
+            }
+        };
+
+        info!(
+            "DKIM result for message from {}: {:?}",
+            self.peer_addr, dkim_result
+        );
+
+        // DMARC verification
+        let dmarc_result = if let Some(ref from_domain) = from_domain {
+            let mail_from_domain = envelope
+                .from
+                .as_ref()
+                .map(|addr| addr.domain.clone());
+
+            // Extract DKIM domain from the message
+            let dkim_domain = self.extract_dkim_domain(message_data);
+
+            match DmarcVerifier::new().await {
+                Ok(verifier) => {
+                    verifier
+                        .verify(
+                            from_domain,
+                            mail_from_domain.as_deref(),
+                            dkim_domain.as_deref(),
+                            &spf_result,
+                            &dkim_result,
+                        )
+                        .await
+                }
+                Err(e) => {
+                    warn!("Failed to create DMARC verifier: {}", e);
+                    DmarcResult::TempError
+                }
+            }
+        } else {
+            DmarcResult::None
+        };
+
+        info!(
+            "DMARC result for message from {}: {:?}",
+            self.peer_addr, dmarc_result
+        );
+
+        AuthenticationResult::new(spf_result, dkim_result, dmarc_result)
+    }
+
+    /// Extract the From header domain from message data
+    fn extract_from_domain(&self, message_data: &[u8]) -> Option<String> {
+        let parsed = mail_parser::MessageParser::default().parse(message_data)?;
+
+        parsed.from().and_then(|addrs| addrs.first()).and_then(|addr| {
+            addr.address().and_then(|email| {
+                email.split('@').last().map(|d| d.to_lowercase())
+            })
+        })
+    }
+
+    /// Extract the DKIM signing domain from message headers
+    fn extract_dkim_domain(&self, message_data: &[u8]) -> Option<String> {
+        let message_str = String::from_utf8_lossy(message_data);
+
+        // Find DKIM-Signature header
+        for line in message_str.lines() {
+            if line.to_lowercase().starts_with("dkim-signature:") {
+                // Extract d= tag
+                for part in line.split(';') {
+                    let part = part.trim();
+                    if part.to_lowercase().starts_with("d=") {
+                        return Some(part[2..].trim().to_lowercase());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Send an SMTP response
