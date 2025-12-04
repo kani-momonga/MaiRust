@@ -1640,6 +1640,7 @@ dependencies = [
  "axum-test",
  "base64 0.22.1",
  "chrono",
+ "hex",
  "hmac",
  "mairust-common",
  "mairust-storage",

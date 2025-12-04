@@ -3,14 +3,18 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
-use mairust_storage::{CreateMailbox, Mailbox, MailboxRepository, MailboxRepositoryTrait};
+use mairust_storage::{
+    CreateMailbox, DomainRepository, DomainRepositoryTrait, Mailbox, MailboxRepository,
+    MailboxRepositoryTrait, UserRepository,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::{error, warn};
 use uuid::Uuid;
 
-use crate::auth::AppState;
+use crate::auth::{require_tenant_access, AppState, AuthContext};
 
 /// Query parameters for listing mailboxes
 #[derive(Debug, Clone, Deserialize)]
@@ -71,23 +75,81 @@ impl From<Mailbox> for MailboxResponse {
 /// List mailboxes for a tenant
 pub async fn list_mailboxes(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<Uuid>,
     Query(query): Query<ListMailboxesQuery>,
 ) -> Result<Json<Vec<MailboxResponse>>, StatusCode> {
+    // Verify the authenticated user has access to this tenant
+    require_tenant_access(&auth, tenant_id)?;
+
     let repo = MailboxRepository::new(state.db_pool.clone());
 
     let mailboxes = if let Some(domain_id) = query.domain_id {
-        repo.list_by_domain(domain_id)
+        // Verify domain belongs to tenant
+        let domain_repo = DomainRepository::new(state.db_pool.clone());
+        let _ = domain_repo
+            .get(tenant_id, domain_id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|e| {
+                error!("Database error while fetching domain: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .ok_or_else(|| {
+                warn!(
+                    "Domain {} not found or not owned by tenant {}",
+                    domain_id, tenant_id
+                );
+                StatusCode::NOT_FOUND
+            })?;
+
+        // list_by_domain returns mailboxes for a domain; filter by tenant in-memory
+        let all_mailboxes = repo.list_by_domain(domain_id).await.map_err(|e| {
+            error!("Database error while listing mailboxes: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Ensure only tenant's mailboxes are returned
+        all_mailboxes
+            .into_iter()
+            .filter(|m| m.tenant_id == tenant_id)
+            .collect()
     } else if let Some(user_id) = query.user_id {
-        repo.list_by_user(user_id)
+        // Verify user belongs to tenant
+        let user_repo = UserRepository::new(state.db_pool.clone());
+        let _ = user_repo
+            .find_by_id(user_id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|e| {
+                error!("Database error while fetching user: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .filter(|u| u.tenant_id == tenant_id)
+            .ok_or_else(|| {
+                warn!(
+                    "User {} not found or not owned by tenant {}",
+                    user_id, tenant_id
+                );
+                StatusCode::NOT_FOUND
+            })?;
+
+        // list_by_user returns mailboxes for a user; filter by tenant in-memory
+        let all_mailboxes = repo.list_by_user(user_id).await.map_err(|e| {
+            error!("Database error while listing mailboxes: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Ensure only tenant's mailboxes are returned
+        all_mailboxes
+            .into_iter()
+            .filter(|m| m.tenant_id == tenant_id)
+            .collect()
     } else {
         repo.list(tenant_id, query.limit, query.offset)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|e| {
+                error!("Database error while listing mailboxes: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
     };
 
     let responses: Vec<MailboxResponse> = mailboxes.into_iter().map(Into::into).collect();
@@ -98,15 +160,28 @@ pub async fn list_mailboxes(
 /// Get a mailbox by ID
 pub async fn get_mailbox(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
     Path((tenant_id, mailbox_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<MailboxResponse>, StatusCode> {
+    // Verify the authenticated user has access to this tenant
+    require_tenant_access(&auth, tenant_id)?;
+
     let repo = MailboxRepository::new(state.db_pool.clone());
 
     let mailbox = repo
         .get(tenant_id, mailbox_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| {
+            error!("Database error while fetching mailbox: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            warn!(
+                "Mailbox {} not found or not owned by tenant {}",
+                mailbox_id, tenant_id
+            );
+            StatusCode::NOT_FOUND
+        })?;
 
     Ok(Json(mailbox.into()))
 }
@@ -114,9 +189,50 @@ pub async fn get_mailbox(
 /// Create a new mailbox
 pub async fn create_mailbox(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<Uuid>,
     Json(input): Json<CreateMailboxRequest>,
 ) -> Result<(StatusCode, Json<MailboxResponse>), StatusCode> {
+    // Verify the authenticated user has access to this tenant
+    require_tenant_access(&auth, tenant_id)?;
+
+    // Verify domain belongs to tenant
+    let domain_repo = DomainRepository::new(state.db_pool.clone());
+    let _ = domain_repo
+        .get(tenant_id, input.domain_id)
+        .await
+        .map_err(|e| {
+            error!("Database error while fetching domain: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            warn!(
+                "Domain {} not found or not owned by tenant {}",
+                input.domain_id, tenant_id
+            );
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Verify user belongs to tenant (if provided)
+    if let Some(user_id) = input.user_id {
+        let user_repo = UserRepository::new(state.db_pool.clone());
+        let _ = user_repo
+            .find_by_id(user_id)
+            .await
+            .map_err(|e| {
+                error!("Database error while fetching user: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .filter(|u| u.tenant_id == tenant_id)
+            .ok_or_else(|| {
+                warn!(
+                    "User {} not found or not owned by tenant {}",
+                    user_id, tenant_id
+                );
+                StatusCode::BAD_REQUEST
+            })?;
+    }
+
     let repo = MailboxRepository::new(state.db_pool.clone());
 
     // Check if address already exists
@@ -133,10 +249,10 @@ pub async fn create_mailbox(
         quota_bytes: input.quota_bytes,
     };
 
-    let mailbox = repo
-        .create(create_input)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mailbox = repo.create(create_input).await.map_err(|e| {
+        error!("Database error while creating mailbox: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok((StatusCode::CREATED, Json(mailbox.into())))
 }
@@ -144,26 +260,45 @@ pub async fn create_mailbox(
 /// Update mailbox quota
 pub async fn update_mailbox_quota(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
     Path((tenant_id, mailbox_id)): Path<(Uuid, Uuid)>,
     Json(input): Json<UpdateQuotaRequest>,
 ) -> Result<Json<MailboxResponse>, StatusCode> {
+    // Verify the authenticated user has access to this tenant
+    require_tenant_access(&auth, tenant_id)?;
+
     let repo = MailboxRepository::new(state.db_pool.clone());
 
     // Check mailbox exists and belongs to tenant
     let _ = repo
         .get(tenant_id, mailbox_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| {
+            error!("Database error while fetching mailbox: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            warn!(
+                "Mailbox {} not found or not owned by tenant {}",
+                mailbox_id, tenant_id
+            );
+            StatusCode::NOT_FOUND
+        })?;
 
     repo.update_quota(mailbox_id, input.quota_bytes)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!("Database error while updating mailbox quota: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let mailbox = repo
         .get(tenant_id, mailbox_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            error!("Database error while fetching mailbox: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(mailbox.into()))
@@ -172,20 +307,34 @@ pub async fn update_mailbox_quota(
 /// Delete a mailbox
 pub async fn delete_mailbox(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
     Path((tenant_id, mailbox_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode> {
+    // Verify the authenticated user has access to this tenant
+    require_tenant_access(&auth, tenant_id)?;
+
     let repo = MailboxRepository::new(state.db_pool.clone());
 
     // Check mailbox exists and belongs to tenant
     let _ = repo
         .get(tenant_id, mailbox_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| {
+            error!("Database error while fetching mailbox: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            warn!(
+                "Mailbox {} not found or not owned by tenant {}",
+                mailbox_id, tenant_id
+            );
+            StatusCode::NOT_FOUND
+        })?;
 
-    repo.delete(mailbox_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    repo.delete(mailbox_id).await.map_err(|e| {
+        error!("Database error while deleting mailbox: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
