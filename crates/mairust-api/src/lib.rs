@@ -5,6 +5,8 @@
 
 pub mod auth;
 pub mod handlers;
+pub mod openapi;
 pub mod routes;
 
+pub use openapi::create_openapi_routes;
 pub use routes::create_router;

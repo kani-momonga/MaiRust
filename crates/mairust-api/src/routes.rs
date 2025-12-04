@@ -11,6 +11,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::{auth_middleware, AppState};
 use crate::handlers::{domains, health, hooks, mailboxes, messages, send, tenants, users};
+use crate::openapi::create_openapi_routes;
 
 /// Create the API router
 pub fn create_router(db_pool: DatabasePool) -> Router {
@@ -92,9 +93,13 @@ pub fn create_router(db_pool: DatabasePool) -> Router {
         ))
         .with_state(state.clone());
 
+    // OpenAPI documentation routes
+    let openapi_routes = create_openapi_routes();
+
     // Combine all routes
     Router::new()
         .nest("/health", health_routes)
         .nest("/api/v1", api_v1)
+        .merge(openapi_routes)
         .layer(TraceLayer::new_for_http())
 }
