@@ -45,6 +45,9 @@ hex = "0.4"
 # DKIM key handling
 rsa = { workspace = true }
 
+# DNS resolution
+trust-dns-resolver = { workspace = true }
+
 # Metrics
 prometheus = { workspace = true }
 

@@ -12,7 +12,9 @@ use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
 use crate::auth::{require_tenant_access, AppState, AuthContext};
@@ -265,36 +267,144 @@ pub async fn verify_domain(
 
 /// Perform DNS verification checks for a domain
 ///
-/// NOTE: This is a placeholder implementation that always returns unverified.
-/// In production, this should:
-/// 1. Resolve MX records and verify they point to our mail servers
-/// 2. Resolve TXT records and verify SPF configuration
-/// 3. Optionally verify a verification token in DNS
+/// This function performs actual DNS lookups to verify:
+/// 1. MX records exist and point to a mail server
+/// 2. SPF TXT record exists and is properly configured
 ///
-/// To implement real DNS verification, add `trust-dns-resolver` dependency and
-/// perform actual DNS lookups for MX/TXT records.
+/// Both checks must pass for the domain to be marked as verified.
 async fn perform_dns_verification(domain_name: &str) -> VerificationStatus {
-    // SECURITY: DNS verification is not yet implemented.
-    // We must NOT return verified=true without actually checking DNS records,
-    // as this would allow spoofed domains to be marked as verified.
-    //
-    // Until real DNS verification is implemented, we always return unverified
-    // to prevent unauthorized domain verification.
+    let mut errors = Vec::new();
 
-    warn!(
-        "DNS verification for {} not yet implemented - returning unverified. \
-         Implement DNS lookups using trust-dns-resolver to enable verification.",
-        domain_name
-    );
+    // Create DNS resolver with default system configuration
+    let resolver =
+        TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+
+    // Get expected hostname for MX verification
+    let expected_hostname =
+        std::env::var("MAIRUST_HOSTNAME").unwrap_or_else(|_| "mail.example.com".to_string());
+
+    // Check MX records
+    let mx_found = match resolver.mx_lookup(domain_name).await {
+        Ok(mx_response) => {
+            let mx_records: Vec<_> = mx_response.iter().collect();
+            if mx_records.is_empty() {
+                errors.push("No MX records found for domain".to_string());
+                false
+            } else {
+                // Check if any MX record points to our mail server
+                let has_valid_mx = mx_records.iter().any(|mx| {
+                    let exchange = mx.exchange().to_string();
+                    let exchange_trimmed = exchange.trim_end_matches('.');
+                    debug!(
+                        "Found MX record: {} (priority: {})",
+                        exchange_trimmed,
+                        mx.preference()
+                    );
+                    exchange_trimmed.eq_ignore_ascii_case(&expected_hostname)
+                        || exchange_trimmed.ends_with(&format!(".{}", expected_hostname))
+                });
+
+                if has_valid_mx {
+                    info!(
+                        "MX record verified for domain {} pointing to {}",
+                        domain_name, expected_hostname
+                    );
+                    true
+                } else {
+                    let found_records: Vec<String> = mx_records
+                        .iter()
+                        .map(|mx| mx.exchange().to_string().trim_end_matches('.').to_string())
+                        .collect();
+                    errors.push(format!(
+                        "MX records found ({}) but none point to {}",
+                        found_records.join(", "),
+                        expected_hostname
+                    ));
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!("MX lookup failed for {}: {}", domain_name, e);
+            errors.push(format!("MX record lookup failed: {}", e));
+            false
+        }
+    };
+
+    // Check SPF TXT record
+    let spf_found = match resolver.txt_lookup(domain_name).await {
+        Ok(txt_response) => {
+            let txt_records: Vec<String> = txt_response
+                .iter()
+                .map(|txt| {
+                    txt.iter()
+                        .map(|data| String::from_utf8_lossy(data).to_string())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .collect();
+
+            debug!("Found TXT records for {}: {:?}", domain_name, txt_records);
+
+            // Look for SPF record
+            let spf_record = txt_records.iter().find(|r| r.starts_with("v=spf1"));
+
+            match spf_record {
+                Some(spf) => {
+                    // Verify SPF record includes our mail server
+                    // Accept records that include 'mx', 'a:', 'include:', or the expected hostname
+                    let spf_lower = spf.to_lowercase();
+                    let is_valid_spf = spf_lower.contains("mx")
+                        || spf_lower.contains(&format!("a:{}", expected_hostname.to_lowercase()))
+                        || spf_lower.contains(&format!(
+                            "include:{}",
+                            expected_hostname.to_lowercase()
+                        ))
+                        || spf_lower.contains(&expected_hostname.to_lowercase());
+
+                    if is_valid_spf {
+                        info!("SPF record verified for domain {}: {}", domain_name, spf);
+                        true
+                    } else {
+                        errors.push(format!(
+                            "SPF record found but does not include mail server: {}",
+                            spf
+                        ));
+                        false
+                    }
+                }
+                None => {
+                    errors.push("No SPF record (v=spf1) found in TXT records".to_string());
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!("TXT lookup failed for {}: {}", domain_name, e);
+            errors.push(format!("TXT record lookup failed: {}", e));
+            false
+        }
+    };
+
+    let verified = mx_found && spf_found;
+
+    if verified {
+        info!(
+            "Domain {} successfully verified (MX and SPF records confirmed)",
+            domain_name
+        );
+    } else {
+        warn!(
+            "Domain {} verification failed: {:?}",
+            domain_name, errors
+        );
+    }
 
     VerificationStatus {
-        verified: false,
-        mx_record_found: false,
-        spf_record_found: false,
-        verification_errors: vec![
-            "DNS verification not yet implemented. MX record check required.".to_string(),
-            "DNS verification not yet implemented. SPF record check required.".to_string(),
-        ],
+        verified,
+        mx_record_found: mx_found,
+        spf_record_found: spf_found,
+        verification_errors: errors,
     }
 }
 
