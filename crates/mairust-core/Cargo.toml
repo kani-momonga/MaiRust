@@ -1,0 +1,79 @@
+[package]
+name = "mairust-core"
+description = "Core SMTP server for MaiRust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mairust"
+path = "src/main.rs"
+
+[dependencies]
+mairust-common = { workspace = true }
+mairust-storage = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-rustls = { workspace = true }
+
+# SMTP
+mailin-embedded = { workspace = true }
+mail-parser = { workspace = true }
+mail-builder = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# UUID & Time
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# HTTP client (for hooks)
+reqwest = { workspace = true }
+
+# Metrics
+prometheus = { workspace = true }
+
+# Async trait
+async-trait = "0.1"
+
+# Authentication
+argon2 = { workspace = true }
+base64 = "0.22"
+
+# Database (for queue and hooks)
+sqlx = { workspace = true }
+
+# DNS (for SPF/DKIM/DMARC)
+trust-dns-resolver = "0.23"
+
+# IP networking
+ipnet = { workspace = true }
+
+# DKIM signing
+rsa = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+
+# Regex for spam rules
+regex = "1.10"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+wiremock = { workspace = true }

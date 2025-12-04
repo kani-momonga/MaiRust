@@ -1,0 +1,38 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Local configuration
+config.toml
+config.yaml
+config.local.toml
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+*.profraw
+coverage/
+
+# Database files
+*.db
+*.sqlite
+
+# Backup files
+*.bak
