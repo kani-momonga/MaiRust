@@ -5,10 +5,16 @@ use axum::{
     http::StatusCode,
     Extension, Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use mairust_storage::{CreateDomain, Domain, DomainRepository, DomainRepositoryTrait};
+use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
+use rsa::traits::PublicKeyParts;
+use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
 use crate::auth::{require_tenant_access, AppState, AuthContext};
@@ -261,38 +267,141 @@ pub async fn verify_domain(
 
 /// Perform DNS verification checks for a domain
 ///
-/// NOTE: This is a placeholder implementation. In production, this should:
-/// 1. Resolve MX records and verify they point to our mail servers
-/// 2. Resolve TXT records and verify SPF configuration
-/// 3. Optionally verify a verification token in DNS
+/// This function performs actual DNS lookups to verify:
+/// 1. MX records exist and point to a mail server
+/// 2. SPF TXT record exists and is properly configured
+///
+/// Both checks must pass for the domain to be marked as verified.
 async fn perform_dns_verification(domain_name: &str) -> VerificationStatus {
     let mut errors = Vec::new();
 
-    // In production, these would be actual DNS lookups:
-    // - Check MX records point to our mail servers
-    // - Check SPF record includes our servers
-    // - Check for verification TXT record
+    // Create DNS resolver with default system configuration
+    let resolver =
+        TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
 
-    // For now, we require explicit acknowledgment that DNS is configured
-    // by checking if the domain appears to have valid DNS structure
-    let mx_found = !domain_name.is_empty();
-    let spf_found = !domain_name.is_empty();
+    // Get expected hostname for MX verification
+    let expected_hostname =
+        std::env::var("MAIRUST_HOSTNAME").unwrap_or_else(|_| "mail.example.com".to_string());
 
-    if !mx_found {
-        errors.push("MX record not found or not pointing to mail server".to_string());
+    // Check MX records
+    let mx_found = match resolver.mx_lookup(domain_name).await {
+        Ok(mx_response) => {
+            let mx_records: Vec<_> = mx_response.iter().collect();
+            if mx_records.is_empty() {
+                errors.push("No MX records found for domain".to_string());
+                false
+            } else {
+                // Check if any MX record points to our mail server
+                let has_valid_mx = mx_records.iter().any(|mx| {
+                    let exchange = mx.exchange().to_string();
+                    let exchange_trimmed = exchange.trim_end_matches('.');
+                    debug!(
+                        "Found MX record: {} (priority: {})",
+                        exchange_trimmed,
+                        mx.preference()
+                    );
+                    exchange_trimmed.eq_ignore_ascii_case(&expected_hostname)
+                        || exchange_trimmed.ends_with(&format!(".{}", expected_hostname))
+                });
+
+                if has_valid_mx {
+                    info!(
+                        "MX record verified for domain {} pointing to {}",
+                        domain_name, expected_hostname
+                    );
+                    true
+                } else {
+                    let found_records: Vec<String> = mx_records
+                        .iter()
+                        .map(|mx| mx.exchange().to_string().trim_end_matches('.').to_string())
+                        .collect();
+                    errors.push(format!(
+                        "MX records found ({}) but none point to {}",
+                        found_records.join(", "),
+                        expected_hostname
+                    ));
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!("MX lookup failed for {}: {}", domain_name, e);
+            errors.push(format!("MX record lookup failed: {}", e));
+            false
+        }
+    };
+
+    // Check SPF TXT record
+    let spf_found = match resolver.txt_lookup(domain_name).await {
+        Ok(txt_response) => {
+            let txt_records: Vec<String> = txt_response
+                .iter()
+                .map(|txt| {
+                    txt.iter()
+                        .map(|data| String::from_utf8_lossy(data).to_string())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .collect();
+
+            debug!("Found TXT records for {}: {:?}", domain_name, txt_records);
+
+            // Look for SPF record
+            let spf_record = txt_records.iter().find(|r| r.starts_with("v=spf1"));
+
+            match spf_record {
+                Some(spf) => {
+                    // Verify SPF record includes our mail server
+                    // Accept records that include 'mx', 'a:', 'include:', or the expected hostname
+                    let spf_lower = spf.to_lowercase();
+                    let is_valid_spf = spf_lower.contains("mx")
+                        || spf_lower.contains(&format!("a:{}", expected_hostname.to_lowercase()))
+                        || spf_lower.contains(&format!(
+                            "include:{}",
+                            expected_hostname.to_lowercase()
+                        ))
+                        || spf_lower.contains(&expected_hostname.to_lowercase());
+
+                    if is_valid_spf {
+                        info!("SPF record verified for domain {}: {}", domain_name, spf);
+                        true
+                    } else {
+                        errors.push(format!(
+                            "SPF record found but does not include mail server: {}",
+                            spf
+                        ));
+                        false
+                    }
+                }
+                None => {
+                    errors.push("No SPF record (v=spf1) found in TXT records".to_string());
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!("TXT lookup failed for {}: {}", domain_name, e);
+            errors.push(format!("TXT record lookup failed: {}", e));
+            false
+        }
+    };
+
+    let verified = mx_found && spf_found;
+
+    if verified {
+        info!(
+            "Domain {} successfully verified (MX and SPF records confirmed)",
+            domain_name
+        );
+    } else {
+        warn!(
+            "Domain {} verification failed: {:?}",
+            domain_name, errors
+        );
     }
-    if !spf_found {
-        errors.push("SPF record not found or misconfigured".to_string());
-    }
-
-    // Log a warning that this is a placeholder
-    warn!(
-        "DNS verification for {} using placeholder implementation - production should use real DNS lookups",
-        domain_name
-    );
 
     VerificationStatus {
-        verified: errors.is_empty(),
+        verified,
         mx_record_found: mx_found,
         spf_record_found: spf_found,
         verification_errors: errors,
@@ -310,7 +419,8 @@ pub struct SetDkimResponse {
 /// Set DKIM for a domain
 ///
 /// This endpoint sets up DKIM signing for a domain. It validates the selector
-/// format and the private key format before storing.
+/// format and the private key format before storing. The public key is extracted
+/// from the private key and returned in the DNS record format.
 pub async fn set_dkim(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -326,11 +436,14 @@ pub async fn set_dkim(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Validate private key format (should be PEM-encoded RSA key)
-    if !is_valid_rsa_private_key(&input.private_key) {
-        warn!("Invalid DKIM private key format");
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    // Parse and validate the private key, extracting the public key
+    let public_key_base64 = match extract_public_key_from_pem(&input.private_key) {
+        Ok(pk) => pk,
+        Err(e) => {
+            warn!("Invalid DKIM private key: {}", e);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
 
     let repo = DomainRepository::new(state.db_pool.clone());
 
@@ -375,10 +488,10 @@ pub async fn set_dkim(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Generate the DKIM DNS record that should be published
+    // Generate the DKIM DNS record with the actual public key
     let dkim_dns_record = TxtRecord {
         host: format!("{}._domainkey.{}", input.selector, domain.name),
-        value: "v=DKIM1; k=rsa; p=<YOUR_PUBLIC_KEY>".to_string(),
+        value: format!("v=DKIM1; k=rsa; p={}", public_key_base64),
     };
 
     info!(
@@ -432,6 +545,34 @@ fn generate_dns_records(domain: &Domain) -> DnsRecords {
     let hostname =
         std::env::var("MAIRUST_HOSTNAME").unwrap_or_else(|_| "mail.example.com".to_string());
 
+    // Extract public key from DKIM private key if configured
+    let dkim_record = match (&domain.dkim_selector, &domain.dkim_private_key) {
+        (Some(selector), Some(private_key)) => {
+            match extract_public_key_from_pem(private_key) {
+                Ok(public_key_base64) => Some(TxtRecord {
+                    host: format!("{}._domainkey.{}", selector, domain.name),
+                    value: format!("v=DKIM1; k=rsa; p={}", public_key_base64),
+                }),
+                Err(e) => {
+                    warn!(
+                        "Failed to extract public key for domain {}: {}",
+                        domain.name, e
+                    );
+                    None
+                }
+            }
+        }
+        (Some(selector), None) => {
+            // Selector is set but no private key - indicate DKIM is not fully configured
+            warn!(
+                "Domain {} has DKIM selector {} but no private key configured",
+                domain.name, selector
+            );
+            None
+        }
+        _ => None,
+    };
+
     DnsRecords {
         mx: MxRecord {
             host: domain.name.clone(),
@@ -442,10 +583,7 @@ fn generate_dns_records(domain: &Domain) -> DnsRecords {
             host: domain.name.clone(),
             value: format!("v=spf1 mx a:{} ~all", hostname),
         },
-        dkim: domain.dkim_selector.as_ref().map(|selector| TxtRecord {
-            host: format!("{}._domainkey.{}", selector, domain.name),
-            value: "v=DKIM1; k=rsa; p=<public_key>".to_string(),
-        }),
+        dkim: dkim_record,
         dmarc: TxtRecord {
             host: format!("_dmarc.{}", domain.name),
             value: format!("v=DMARC1; p=none; rua=mailto:dmarc@{}", domain.name),
@@ -519,30 +657,49 @@ fn is_valid_dkim_selector(selector: &str) -> bool {
     selector.chars().all(|c| c.is_alphanumeric() || c == '-')
 }
 
-/// Validate RSA private key format
+/// Extract public key from a PEM-encoded RSA private key
 ///
-/// This performs basic validation that the key appears to be a PEM-encoded RSA private key.
-/// In production, this should be enhanced to actually parse and validate the key.
-fn is_valid_rsa_private_key(key: &str) -> bool {
-    let key_trimmed = key.trim();
+/// This function parses the private key, validates it, and extracts the public key
+/// in the format needed for DKIM DNS records (DER-encoded, base64).
+///
+/// Returns the base64-encoded public key suitable for the `p=` parameter in DKIM records.
+fn extract_public_key_from_pem(pem_key: &str) -> Result<String, String> {
+    let key_trimmed = pem_key.trim();
 
-    // Check for PEM format markers
-    let is_pkcs1 = key_trimmed.starts_with("-----BEGIN RSA PRIVATE KEY-----")
-        && key_trimmed.ends_with("-----END RSA PRIVATE KEY-----");
+    // Try to parse as PKCS#8 first (-----BEGIN PRIVATE KEY-----)
+    let private_key = if key_trimmed.starts_with("-----BEGIN PRIVATE KEY-----") {
+        RsaPrivateKey::from_pkcs8_pem(key_trimmed)
+            .map_err(|e| format!("Failed to parse PKCS#8 private key: {}", e))?
+    } else if key_trimmed.starts_with("-----BEGIN RSA PRIVATE KEY-----") {
+        // PKCS#1 format - need to use different parser
+        use rsa::pkcs1::DecodeRsaPrivateKey;
+        RsaPrivateKey::from_pkcs1_pem(key_trimmed)
+            .map_err(|e| format!("Failed to parse PKCS#1 private key: {}", e))?
+    } else {
+        return Err("Invalid PEM format: expected PKCS#1 or PKCS#8 private key".to_string());
+    };
 
-    let is_pkcs8 = key_trimmed.starts_with("-----BEGIN PRIVATE KEY-----")
-        && key_trimmed.ends_with("-----END PRIVATE KEY-----");
-
-    if !is_pkcs1 && !is_pkcs8 {
-        return false;
+    // Validate key size (DKIM requires at least 1024 bits, recommend 2048+)
+    let key_bits = private_key.size() * 8;
+    if key_bits < 1024 {
+        return Err(format!(
+            "Key size {} bits is too small for DKIM (minimum 1024 bits)",
+            key_bits
+        ));
+    }
+    if key_bits > 4096 {
+        return Err(format!(
+            "Key size {} bits exceeds maximum supported (4096 bits)",
+            key_bits
+        ));
     }
 
-    // Check that key has reasonable length (at least 1024 bits = ~200 chars base64)
-    // and not too long (max 4096 bits = ~700 chars base64)
-    let key_body_len = key_trimmed.len();
-    if key_body_len < 200 || key_body_len > 5000 {
-        return false;
-    }
+    // Extract the public key and encode as DER
+    let public_key = private_key.to_public_key();
+    let public_key_der = public_key
+        .to_public_key_der()
+        .map_err(|e| format!("Failed to encode public key: {}", e))?;
 
-    true
+    // Base64 encode for DKIM DNS record
+    Ok(BASE64_STANDARD.encode(public_key_der.as_bytes()))
 }
