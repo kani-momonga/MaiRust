@@ -66,6 +66,9 @@ rustls-pemfile = "2.0"
 rsa = { version = "0.9", features = ["sha2"] }
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "pem"] }
 
+# Encoding
+base64 = "0.22"
+
 # Networking
 ipnet = "2.9"
 

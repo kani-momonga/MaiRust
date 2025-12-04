@@ -14,3 +14,8 @@ pub use users::DbUserRepository as UserRepository;
 pub use mailboxes::DbMailboxRepository as MailboxRepository;
 pub use domains::DbDomainRepository as DomainRepository;
 pub use hooks::DbHookRepository as HookRepository;
+
+// Re-export repository traits
+pub use domains::DomainRepository as DomainRepositoryTrait;
+pub use hooks::HookRepository as HookRepositoryTrait;
+pub use mailboxes::MailboxRepository as MailboxRepositoryTrait;
