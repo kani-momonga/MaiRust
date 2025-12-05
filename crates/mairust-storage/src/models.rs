@@ -443,3 +443,151 @@ pub struct PolicyAction {
     pub action_type: PolicyActionType,
     pub parameters: serde_json::Value,
 }
+
+// ============================================================================
+// Phase 3: Message Threading
+// ============================================================================
+
+/// Thread model
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Thread {
+    pub id: uuid::Uuid,
+    pub tenant_id: TenantId,
+    pub mailbox_id: MailboxId,
+    pub subject: Option<String>,
+    pub participant_addresses: serde_json::Value,
+    pub message_count: i32,
+    pub unread_count: i32,
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub last_message_id: Option<MessageId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Create thread input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateThread {
+    pub tenant_id: TenantId,
+    pub mailbox_id: MailboxId,
+    pub subject: Option<String>,
+}
+
+// ============================================================================
+// Phase 3: Enhanced Tagging System
+// ============================================================================
+
+/// Tag model
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: uuid::Uuid,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub color: Option<String>,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Create tag input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTag {
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub color: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Update tag input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateTag {
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Message tag relationship
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct MessageTag {
+    pub message_id: MessageId,
+    pub tag_id: uuid::Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+// ============================================================================
+// Phase 3: AI Categorization
+// ============================================================================
+
+/// Category model
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Category {
+    pub id: uuid::Uuid,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub priority: i32,
+    pub auto_rules: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Create category input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCategory {
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub priority: Option<i32>,
+    pub auto_rules: Option<serde_json::Value>,
+}
+
+/// AI categorization result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategorizationResult {
+    pub category_id: uuid::Uuid,
+    pub confidence: f32,
+    pub summary: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+// ============================================================================
+// Phase 3: Plugin System
+// ============================================================================
+
+/// Plugin event log
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct PluginEvent {
+    pub id: uuid::Uuid,
+    pub plugin_id: String,
+    pub tenant_id: Option<TenantId>,
+    pub event_type: String,
+    pub message_id: Option<MessageId>,
+    pub input_data: Option<serde_json::Value>,
+    pub output_data: Option<serde_json::Value>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub execution_time_ms: Option<i32>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Plugin configuration per tenant
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct PluginConfig {
+    pub plugin_id: String,
+    pub tenant_id: TenantId,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Mailbox subscription
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct MailboxSubscription {
+    pub user_id: UserId,
+    pub mailbox_id: MailboxId,
+    pub subscribed: bool,
+    pub created_at: DateTime<Utc>,
+}

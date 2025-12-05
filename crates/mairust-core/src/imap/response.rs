@@ -57,7 +57,32 @@ impl ImapResponse {
 
     /// CAPABILITY response
     pub fn capability() -> String {
-        "* CAPABILITY IMAP4rev1 LITERAL+ SASL-IR LOGIN AUTH=PLAIN IDLE NAMESPACE\r\n".to_string()
+        "* CAPABILITY IMAP4rev1 LITERAL+ SASL-IR LOGIN AUTH=PLAIN IDLE NAMESPACE MOVE UIDPLUS\r\n".to_string()
+    }
+
+    /// Update CAPABILITY in greeting to include write operations
+    pub fn greeting_full() -> String {
+        "* OK [CAPABILITY IMAP4rev1 LITERAL+ SASL-IR LOGIN AUTH=PLAIN IDLE MOVE UIDPLUS] MaiRust IMAP server ready\r\n".to_string()
+    }
+
+    /// EXPUNGE response
+    pub fn expunge(seq: u32) -> String {
+        format!("* {} EXPUNGE\r\n", seq)
+    }
+
+    /// COPYUID/APPENDUID response code
+    pub fn copyuid(uid_validity: u32, source_uids: &str, dest_uids: &str) -> String {
+        format!("[COPYUID {} {} {}]", uid_validity, source_uids, dest_uids)
+    }
+
+    pub fn appenduid(uid_validity: u32, uid: u32) -> String {
+        format!("[APPENDUID {} {}]", uid_validity, uid)
+    }
+
+    /// NAMESPACE response
+    pub fn namespace() -> String {
+        // Personal namespace, Other users namespace, Shared namespace
+        "* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n".to_string()
     }
 
     /// LIST response for a mailbox
