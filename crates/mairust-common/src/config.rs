@@ -31,6 +31,14 @@ pub struct Config {
 
     /// TLS configuration
     pub tls: Option<TlsConfig>,
+
+    /// Meilisearch configuration for full-text search
+    #[serde(default)]
+    pub meilisearch: MeilisearchConfig,
+
+    /// IMAP configuration
+    #[serde(default)]
+    pub imap: ImapConfig,
 }
 
 /// Server configuration
@@ -317,6 +325,101 @@ pub struct TlsConfig {
 
     /// Path to private key file
     pub key_path: PathBuf,
+}
+
+/// Meilisearch configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeilisearchConfig {
+    /// Enable Meilisearch integration
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Meilisearch server URL
+    #[serde(default = "default_meilisearch_url")]
+    pub url: String,
+
+    /// API key for authentication
+    pub api_key: Option<String>,
+
+    /// Request timeout in seconds
+    #[serde(default = "default_meilisearch_timeout")]
+    pub timeout_secs: u64,
+
+    /// Index name for messages
+    #[serde(default = "default_messages_index")]
+    pub messages_index: String,
+}
+
+impl Default for MeilisearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_meilisearch_url(),
+            api_key: None,
+            timeout_secs: default_meilisearch_timeout(),
+            messages_index: default_messages_index(),
+        }
+    }
+}
+
+fn default_meilisearch_url() -> String {
+    "http://localhost:7700".to_string()
+}
+
+fn default_meilisearch_timeout() -> u64 {
+    30
+}
+
+fn default_messages_index() -> String {
+    "messages".to_string()
+}
+
+/// IMAP server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImapConfig {
+    /// Enable IMAP server
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// IMAP server bind address
+    #[serde(default = "default_imap_bind")]
+    pub bind: String,
+
+    /// Enable STARTTLS
+    #[serde(default)]
+    pub starttls: bool,
+
+    /// Session timeout in minutes
+    #[serde(default = "default_imap_timeout")]
+    pub timeout_minutes: i64,
+
+    /// Maximum concurrent connections
+    #[serde(default = "default_imap_max_connections")]
+    pub max_connections: usize,
+}
+
+impl Default for ImapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_imap_bind(),
+            starttls: false,
+            timeout_minutes: default_imap_timeout(),
+            max_connections: default_imap_max_connections(),
+        }
+    }
+}
+
+fn default_imap_bind() -> String {
+    "0.0.0.0:143".to_string()
+}
+
+fn default_imap_timeout() -> i64 {
+    30
+}
+
+fn default_imap_max_connections() -> usize {
+    1000
 }
 
 impl Config {

@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use mairust_common::types::{
-    DomainId, HookId, HookType, MailboxId, MessageFlags, MessageId, TenantId, UserId, UserRole,
+    DomainAliasId, DomainId, HookId, HookType, MailboxId, MessageFlags, MessageId, PolicyId,
+    TenantId, UserId, UserRole,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -268,4 +269,177 @@ pub struct CreateMessage {
     pub has_attachments: bool,
     pub storage_path: String,
     pub received_at: DateTime<Utc>,
+}
+
+// ============================================================================
+// Phase 2: Multi-domain support enhancements
+// ============================================================================
+
+/// Domain alias model - maps alias domain to primary domain
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct DomainAlias {
+    pub id: DomainAliasId,
+    pub tenant_id: TenantId,
+    pub alias_domain: String,
+    pub primary_domain_id: DomainId,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Domain settings model - extended configuration for domains
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct DomainSettings {
+    pub domain_id: DomainId,
+    /// Enable catch-all for unknown addresses
+    pub catch_all_enabled: bool,
+    /// Mailbox to receive catch-all emails
+    pub catch_all_mailbox_id: Option<MailboxId>,
+    /// Maximum message size for this domain (bytes)
+    pub max_message_size: Option<i64>,
+    /// Maximum recipients per message
+    pub max_recipients: Option<i32>,
+    /// Rate limit: messages per hour
+    pub rate_limit_per_hour: Option<i32>,
+    /// Require TLS for inbound connections
+    pub require_tls_inbound: bool,
+    /// Require TLS for outbound connections
+    pub require_tls_outbound: bool,
+    /// Custom SPF policy mode
+    pub spf_policy: String,
+    /// Custom DMARC policy mode
+    pub dmarc_policy: String,
+    /// Additional settings as JSON
+    pub extra_settings: serde_json::Value,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Default for DomainSettings {
+    fn default() -> Self {
+        Self {
+            domain_id: uuid::Uuid::nil(),
+            catch_all_enabled: false,
+            catch_all_mailbox_id: None,
+            max_message_size: None,
+            max_recipients: None,
+            rate_limit_per_hour: None,
+            require_tls_inbound: false,
+            require_tls_outbound: false,
+            spf_policy: "neutral".to_string(),
+            dmarc_policy: "none".to_string(),
+            extra_settings: serde_json::json!({}),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+/// Create domain alias input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDomainAlias {
+    pub tenant_id: TenantId,
+    pub alias_domain: String,
+    pub primary_domain_id: DomainId,
+}
+
+/// Update domain settings input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateDomainSettings {
+    pub catch_all_enabled: Option<bool>,
+    pub catch_all_mailbox_id: Option<MailboxId>,
+    pub max_message_size: Option<i64>,
+    pub max_recipients: Option<i32>,
+    pub rate_limit_per_hour: Option<i32>,
+    pub require_tls_inbound: Option<bool>,
+    pub require_tls_outbound: Option<bool>,
+    pub spf_policy: Option<String>,
+    pub dmarc_policy: Option<String>,
+    pub extra_settings: Option<serde_json::Value>,
+}
+
+// ============================================================================
+// Phase 2: Advanced Policy System
+// ============================================================================
+
+/// Policy condition types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyConditionType {
+    SenderDomain,
+    SenderAddress,
+    RecipientDomain,
+    RecipientAddress,
+    SubjectContains,
+    HeaderExists,
+    HeaderValue,
+    MessageSize,
+    AttachmentType,
+    SpamScore,
+    ClientIp,
+    TimeOfDay,
+}
+
+/// Policy action types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyActionType {
+    Allow,
+    Reject,
+    Tempfail,
+    Quarantine,
+    Tag,
+    Redirect,
+    AddHeader,
+    ModifySubject,
+    RateLimit,
+    RequireTls,
+}
+
+/// Policy rule model
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct PolicyRule {
+    pub id: PolicyId,
+    pub tenant_id: Option<TenantId>,
+    pub domain_id: Option<DomainId>,
+    pub name: String,
+    pub description: Option<String>,
+    /// Policy type: inbound, outbound, or both
+    pub policy_type: String,
+    pub priority: i32,
+    pub enabled: bool,
+    /// Conditions as JSON array
+    pub conditions: serde_json::Value,
+    /// Actions as JSON array
+    pub actions: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Create policy rule input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePolicyRule {
+    pub tenant_id: Option<TenantId>,
+    pub domain_id: Option<DomainId>,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub priority: i32,
+    pub conditions: serde_json::Value,
+    pub actions: serde_json::Value,
+}
+
+/// Policy condition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyCondition {
+    pub condition_type: PolicyConditionType,
+    pub operator: String,
+    pub value: serde_json::Value,
+    #[serde(default)]
+    pub negate: bool,
+}
+
+/// Policy action
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyAction {
+    pub action_type: PolicyActionType,
+    pub parameters: serde_json::Value,
 }

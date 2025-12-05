@@ -5,12 +5,18 @@
 
 pub mod email_auth;
 pub mod hooks;
+pub mod imap;
+pub mod policy;
 pub mod queue;
+pub mod search;
 pub mod smtp;
 pub mod spam;
 
 pub use email_auth::{AuthenticationResult, DkimResult, DkimSigner, DmarcResult, SpfResult};
 pub use hooks::HookManager;
+pub use imap::{ImapConfig, ImapServer};
+pub use policy::{PolicyContext, PolicyEngine, PolicyEvaluation, PolicyEvaluationResult, PolicyMatch};
 pub use queue::QueueManager;
+pub use search::{MeilisearchClient, MeilisearchConfig, MessageDocument, MessageIndexer, MessageSearchHit, SearchOptions, SearchResult};
 pub use smtp::SmtpServer;
 pub use spam::{RspamdClient, RspamdConfig, SpamAction, SpamCheckResult, SpamFilter};

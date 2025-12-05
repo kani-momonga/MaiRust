@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 mairust-common = { workspace = true }
 mairust-storage = { workspace = true }
+mairust-core = { workspace = true }
 
 # Async
 tokio = { workspace = true }
