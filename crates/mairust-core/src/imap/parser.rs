@@ -2,7 +2,7 @@
 //!
 //! Parses IMAP4 commands from client input.
 
-use super::command::{FetchItem, ImapCommand, SearchCriteria, SequenceSet, TaggedCommand};
+use super::command::{FetchItem, ImapCommand, SearchCriteria, SequenceSet, StoreFlags, StoreOperation, TaggedCommand};
 use tracing::debug;
 
 /// IMAP command parser
@@ -47,23 +47,46 @@ impl ImapParser {
             "LOGIN" => Self::parse_login(args),
             "AUTHENTICATE" => Self::parse_authenticate(args),
 
-            // Authenticated
+            // Authenticated state - mailbox management
             "SELECT" => Some(ImapCommand::Select {
                 mailbox: Self::parse_mailbox(args),
             }),
             "EXAMINE" => Some(ImapCommand::Examine {
                 mailbox: Self::parse_mailbox(args),
             }),
+            "CREATE" => Some(ImapCommand::Create {
+                mailbox: Self::parse_mailbox(args),
+            }),
+            "DELETE" => Some(ImapCommand::Delete {
+                mailbox: Self::parse_mailbox(args),
+            }),
+            "RENAME" => Self::parse_rename(args),
+            "SUBSCRIBE" => Some(ImapCommand::Subscribe {
+                mailbox: Self::parse_mailbox(args),
+            }),
+            "UNSUBSCRIBE" => Some(ImapCommand::Unsubscribe {
+                mailbox: Self::parse_mailbox(args),
+            }),
             "LIST" => Self::parse_list(args),
             "LSUB" => Self::parse_lsub(args),
             "STATUS" => Self::parse_status(args),
+            "APPEND" => Self::parse_append(args),
             "CLOSE" => Some(ImapCommand::Close),
 
-            // Selected
+            // Selected state - message operations
             "CHECK" => Some(ImapCommand::Check),
             "FETCH" => Self::parse_fetch(args, false),
             "SEARCH" => Self::parse_search(args, false),
+            "STORE" => Self::parse_store(args, false),
+            "COPY" => Self::parse_copy(args, false),
+            "MOVE" => Self::parse_move(args, false),
+            "EXPUNGE" => Some(ImapCommand::Expunge),
             "UID" => Self::parse_uid_command(args),
+
+            // Extensions
+            "IDLE" => Some(ImapCommand::Idle),
+            "DONE" => Some(ImapCommand::Done),
+            "NAMESPACE" => Some(ImapCommand::Namespace),
 
             _ => Some(ImapCommand::Unknown {
                 command: cmd_name,
@@ -231,7 +254,7 @@ impl ImapParser {
         }
     }
 
-    /// Parse UID FETCH/SEARCH commands
+    /// Parse UID FETCH/SEARCH/STORE/COPY/MOVE commands
     fn parse_uid_command(args: &str) -> Option<ImapCommand> {
         let parts: Vec<&str> = args.splitn(2, ' ').collect();
         if parts.is_empty() {
@@ -244,8 +267,146 @@ impl ImapParser {
         match subcmd.as_str() {
             "FETCH" => Self::parse_fetch(subargs, true),
             "SEARCH" => Self::parse_search(subargs, true),
+            "STORE" => Self::parse_store(subargs, true),
+            "COPY" => Self::parse_copy(subargs, true),
+            "MOVE" => Self::parse_move(subargs, true),
+            "EXPUNGE" => Some(ImapCommand::Expunge),
             _ => Some(ImapCommand::Unknown { command: format!("UID {}", subcmd) }),
         }
+    }
+
+    /// Parse RENAME command
+    fn parse_rename(args: &str) -> Option<ImapCommand> {
+        let (old_mailbox, rest) = Self::parse_astring(args)?;
+        let (new_mailbox, _) = Self::parse_astring(rest.trim())?;
+        Some(ImapCommand::Rename { old_mailbox, new_mailbox })
+    }
+
+    /// Parse STORE command
+    fn parse_store(args: &str, uid: bool) -> Option<ImapCommand> {
+        // STORE sequence +FLAGS|-FLAGS|FLAGS (flags...)
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let sequence = SequenceSet::parse(parts[0])?;
+        let rest = parts[1];
+
+        // Parse the flag operation and flags
+        let flags = Self::parse_store_flags(rest)?;
+
+        Some(ImapCommand::Store { sequence, flags, uid })
+    }
+
+    /// Parse STORE flags specification
+    fn parse_store_flags(args: &str) -> Option<StoreFlags> {
+        let args = args.trim();
+
+        // Determine operation type from prefix
+        let (operation, silent, rest) = if args.to_uppercase().starts_with("+FLAGS.SILENT") {
+            (StoreOperation::Add, true, args[13..].trim())
+        } else if args.to_uppercase().starts_with("-FLAGS.SILENT") {
+            (StoreOperation::Remove, true, args[13..].trim())
+        } else if args.to_uppercase().starts_with("FLAGS.SILENT") {
+            (StoreOperation::Replace, true, args[12..].trim())
+        } else if args.to_uppercase().starts_with("+FLAGS") {
+            (StoreOperation::Add, false, args[6..].trim())
+        } else if args.to_uppercase().starts_with("-FLAGS") {
+            (StoreOperation::Remove, false, args[6..].trim())
+        } else if args.to_uppercase().starts_with("FLAGS") {
+            (StoreOperation::Replace, false, args[5..].trim())
+        } else {
+            return None;
+        };
+
+        // Parse flags list
+        let flags = Self::parse_flags_list(rest);
+
+        Some(StoreFlags { operation, silent, flags })
+    }
+
+    /// Parse a parenthesized flags list
+    fn parse_flags_list(args: &str) -> Vec<String> {
+        let args = args.trim();
+
+        // Handle parenthesized list
+        let content = if args.starts_with('(') && args.ends_with(')') {
+            &args[1..args.len()-1]
+        } else {
+            args
+        };
+
+        content
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Parse COPY command
+    fn parse_copy(args: &str, uid: bool) -> Option<ImapCommand> {
+        // COPY sequence mailbox
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let sequence = SequenceSet::parse(parts[0])?;
+        let mailbox = Self::parse_mailbox(parts[1]);
+
+        Some(ImapCommand::Copy { sequence, mailbox, uid })
+    }
+
+    /// Parse MOVE command (IMAP extension)
+    fn parse_move(args: &str, uid: bool) -> Option<ImapCommand> {
+        // MOVE sequence mailbox
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let sequence = SequenceSet::parse(parts[0])?;
+        let mailbox = Self::parse_mailbox(parts[1]);
+
+        Some(ImapCommand::Move { sequence, mailbox, uid })
+    }
+
+    /// Parse APPEND command
+    fn parse_append(args: &str) -> Option<ImapCommand> {
+        // APPEND mailbox [flags] [date-time] {literal}
+        // The actual message content comes after the literal marker
+        let (mailbox, rest) = Self::parse_astring(args)?;
+        let rest = rest.trim();
+
+        let mut flags = Vec::new();
+        let mut date = None;
+        let mut remaining = rest;
+
+        // Parse optional flags (parenthesized list)
+        if remaining.starts_with('(') {
+            if let Some(end) = remaining.find(')') {
+                let flags_str = &remaining[1..end];
+                flags = flags_str.split_whitespace().map(|s| s.to_string()).collect();
+                remaining = remaining[end + 1..].trim();
+            }
+        }
+
+        // Parse optional date-time (quoted string)
+        if remaining.starts_with('"') {
+            let (date_str, rest) = Self::parse_astring(remaining)?;
+            date = Some(date_str);
+            remaining = rest.trim();
+        }
+
+        // The rest should be a literal marker like {1234}
+        // The actual message bytes will be handled by the server after sending continuation
+        // For now, we create the command with empty message - server will populate it
+        Some(ImapCommand::Append {
+            mailbox,
+            flags,
+            date,
+            message: Vec::new(),
+        })
     }
 
     /// Parse mailbox name

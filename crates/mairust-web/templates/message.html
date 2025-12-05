@@ -1,0 +1,331 @@
+{% extends "base" %}
+
+{% block content %}
+<div x-data="messageView()" x-init="loadMessage()" class="max-w-4xl mx-auto">
+    <!-- Loading -->
+    <template x-if="loading">
+        <div class="bg-white rounded-lg shadow p-8 text-center text-gray-500">
+            Loading message...
+        </div>
+    </template>
+
+    <!-- Error -->
+    <template x-if="error">
+        <div class="bg-white rounded-lg shadow p-8 text-center">
+            <p class="text-red-500 mb-4" x-text="error"></p>
+            <a href="/inbox" class="text-blue-500 hover:underline">Back to Inbox</a>
+        </div>
+    </template>
+
+    <!-- Message -->
+    <template x-if="!loading && !error && message">
+        <div class="bg-white rounded-lg shadow">
+            <!-- Header / Actions -->
+            <div class="border-b p-4 flex items-center gap-4">
+                <a href="/inbox" class="text-gray-500 hover:text-gray-700">
+                    &larr; Back
+                </a>
+                <div class="flex-1"></div>
+                <button @click="reply()" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">
+                    Reply
+                </button>
+                <button @click="replyAll()" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">
+                    Reply All
+                </button>
+                <button @click="forward()" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">
+                    Forward
+                </button>
+                <button @click="toggleStar()" :class="message.flagged ? 'text-yellow-500' : 'text-gray-400'">
+                    &#9733;
+                </button>
+                <button @click="deleteMessage()" class="px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200">
+                    Delete
+                </button>
+            </div>
+
+            <!-- Subject -->
+            <div class="p-4 border-b">
+                <h1 class="text-2xl font-semibold" x-text="message.subject || '(no subject)'"></h1>
+                <div class="mt-2 flex items-center gap-2">
+                    <template x-for="tag in message.tags" :key="tag">
+                        <span class="text-xs px-2 py-1 rounded bg-blue-100 text-blue-700" x-text="tag"></span>
+                    </template>
+                    <span x-show="message.category_name" class="text-xs px-2 py-1 rounded bg-green-100 text-green-700" x-text="message.category_name"></span>
+                </div>
+            </div>
+
+            <!-- Sender info -->
+            <div class="p-4 border-b flex items-start gap-4">
+                <div class="w-12 h-12 rounded-full bg-gray-300 flex items-center justify-center text-xl text-gray-600">
+                    <span x-text="getInitials(message.from_address)"></span>
+                </div>
+                <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                        <span class="font-semibold" x-text="message.from_name || message.from_address"></span>
+                        <span class="text-gray-500 text-sm" x-text="'<' + message.from_address + '>'"></span>
+                    </div>
+                    <div class="text-sm text-gray-500">
+                        To: <span x-text="message.to_addresses?.join(', ') || 'unknown'"></span>
+                    </div>
+                    <div class="text-sm text-gray-500" x-show="message.cc_addresses?.length > 0">
+                        Cc: <span x-text="message.cc_addresses?.join(', ')"></span>
+                    </div>
+                    <div class="text-sm text-gray-500" x-text="formatDateTime(message.received_at)"></div>
+                </div>
+                <button @click="showDetails = !showDetails" class="text-sm text-blue-500 hover:underline">
+                    <span x-text="showDetails ? 'Hide Details' : 'Show Details'"></span>
+                </button>
+            </div>
+
+            <!-- Detailed headers -->
+            <div x-show="showDetails" x-collapse class="p-4 bg-gray-50 border-b text-sm">
+                <table class="w-full">
+                    <template x-for="(value, key) in message.headers" :key="key">
+                        <tr>
+                            <td class="py-1 pr-4 font-semibold text-gray-600 align-top" x-text="key + ':'"></td>
+                            <td class="py-1 text-gray-800" x-text="value"></td>
+                        </tr>
+                    </template>
+                </table>
+            </div>
+
+            <!-- Thread info -->
+            <div x-show="thread && thread.message_count > 1" class="p-4 bg-blue-50 border-b">
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-blue-700">
+                        This message is part of a conversation with <span x-text="thread.message_count"></span> messages
+                    </span>
+                    <button @click="loadThread()" class="text-sm text-blue-500 hover:underline">
+                        View Thread
+                    </button>
+                </div>
+            </div>
+
+            <!-- Body -->
+            <div class="p-6">
+                <!-- HTML body -->
+                <template x-if="message.body_html">
+                    <div class="prose max-w-none" x-html="message.body_html"></div>
+                </template>
+                <!-- Plain text body -->
+                <template x-if="!message.body_html">
+                    <pre class="whitespace-pre-wrap font-sans" x-text="message.body_text"></pre>
+                </template>
+            </div>
+
+            <!-- AI Summary (if available) -->
+            <div x-show="message.ai_summary" class="mx-6 mb-6 p-4 bg-purple-50 rounded-lg">
+                <div class="text-sm font-semibold text-purple-700 mb-2">AI Summary</div>
+                <p class="text-sm text-purple-900" x-text="message.ai_summary"></p>
+            </div>
+
+            <!-- Attachments -->
+            <div x-show="message.attachments?.length > 0" class="p-4 border-t bg-gray-50">
+                <h3 class="font-semibold mb-2">Attachments (<span x-text="message.attachments?.length"></span>)</h3>
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    <template x-for="attachment in message.attachments" :key="attachment.id">
+                        <a :href="`/api/attachments/${attachment.id}`"
+                           class="flex items-center gap-2 p-2 bg-white rounded border hover:bg-gray-100">
+                            <span class="text-2xl">&#128196;</span>
+                            <div class="flex-1 min-w-0">
+                                <div class="truncate text-sm" x-text="attachment.filename"></div>
+                                <div class="text-xs text-gray-500" x-text="formatSize(attachment.size)"></div>
+                            </div>
+                        </a>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Thread View -->
+    <div x-show="showThread" class="mt-4 space-y-2">
+        <h3 class="font-semibold text-lg">Thread</h3>
+        <template x-for="msg in threadMessages" :key="msg.id">
+            <div class="bg-white rounded-lg shadow p-4 cursor-pointer hover:bg-gray-50"
+                 :class="{'ring-2 ring-blue-500': msg.id === message.id}"
+                 @click="openMessage(msg.id)">
+                <div class="flex items-center gap-2">
+                    <span class="font-semibold" x-text="msg.from_address"></span>
+                    <span class="flex-1"></span>
+                    <span class="text-sm text-gray-500" x-text="formatDateTime(msg.received_at)"></span>
+                </div>
+                <p class="text-sm text-gray-600 truncate mt-1" x-text="msg.body_preview"></p>
+            </div>
+        </template>
+    </div>
+</div>
+
+<script>
+function messageView() {
+    return {
+        messageId: null,
+        message: null,
+        thread: null,
+        threadMessages: [],
+        showThread: false,
+        showDetails: false,
+        loading: true,
+        error: null,
+
+        init() {
+            // Get message ID from URL
+            const path = window.location.pathname;
+            const match = path.match(/\/message\/([^/]+)/);
+            if (match) {
+                this.messageId = match[1];
+            }
+        },
+
+        async loadMessage() {
+            if (!this.messageId) {
+                this.error = 'No message ID provided';
+                this.loading = false;
+                return;
+            }
+
+            try {
+                // TODO: Fetch from API
+                // const response = await fetch(`${window.API_URL}/messages/${this.messageId}`);
+                // this.message = await response.json();
+
+                // Demo data
+                this.message = {
+                    id: this.messageId,
+                    from_address: 'sender@example.com',
+                    from_name: 'Example Sender',
+                    to_addresses: ['you@example.com'],
+                    cc_addresses: [],
+                    subject: 'Welcome to MaiRust!',
+                    body_text: 'Thank you for trying MaiRust mail server.\n\nThis is a demo message to show the message view functionality.\n\nBest regards,\nThe MaiRust Team',
+                    body_html: null,
+                    received_at: new Date().toISOString(),
+                    seen: true,
+                    flagged: false,
+                    tags: ['important'],
+                    category_name: 'Primary',
+                    ai_summary: 'Welcome email introducing the MaiRust mail server.',
+                    attachments: [],
+                    headers: {
+                        'Message-ID': '<12345@example.com>',
+                        'Date': new Date().toUTCString(),
+                        'MIME-Version': '1.0',
+                        'Content-Type': 'text/plain; charset=utf-8'
+                    },
+                    thread_id: 'thread-1'
+                };
+
+                // Load thread info
+                await this.loadThreadInfo();
+
+            } catch (error) {
+                this.error = 'Failed to load message: ' + error.message;
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        async loadThreadInfo() {
+            if (!this.message.thread_id) return;
+
+            try {
+                // TODO: Fetch thread info from API
+                this.thread = {
+                    id: this.message.thread_id,
+                    message_count: 3,
+                    participant_addresses: ['sender@example.com', 'you@example.com']
+                };
+            } catch (error) {
+                console.error('Failed to load thread info:', error);
+            }
+        },
+
+        async loadThread() {
+            if (!this.message.thread_id) return;
+
+            try {
+                // TODO: Fetch thread messages from API
+                this.threadMessages = [
+                    {
+                        id: '1',
+                        from_address: 'sender@example.com',
+                        body_preview: 'Welcome to MaiRust!',
+                        received_at: new Date(Date.now() - 86400000).toISOString()
+                    },
+                    {
+                        id: this.messageId,
+                        from_address: 'you@example.com',
+                        body_preview: 'Thanks for the welcome...',
+                        received_at: new Date(Date.now() - 43200000).toISOString()
+                    },
+                    {
+                        id: '3',
+                        from_address: 'sender@example.com',
+                        body_preview: 'You\'re welcome! Let us know...',
+                        received_at: new Date().toISOString()
+                    }
+                ];
+                this.showThread = !this.showThread;
+            } catch (error) {
+                console.error('Failed to load thread:', error);
+            }
+        },
+
+        getInitials(email) {
+            if (!email) return '?';
+            const parts = email.split('@')[0].split('.');
+            if (parts.length >= 2) {
+                return (parts[0][0] + parts[1][0]).toUpperCase();
+            }
+            return email[0].toUpperCase();
+        },
+
+        formatDateTime(dateStr) {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            return date.toLocaleString();
+        },
+
+        formatSize(bytes) {
+            if (!bytes) return '';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        },
+
+        reply() {
+            window.location.href = `/compose?replyTo=${this.messageId}`;
+        },
+
+        replyAll() {
+            window.location.href = `/compose?replyTo=${this.messageId}&all=true`;
+        },
+
+        forward() {
+            window.location.href = `/compose?forward=${this.messageId}`;
+        },
+
+        async toggleStar() {
+            this.message.flagged = !this.message.flagged;
+            // TODO: API call to update flag
+        },
+
+        async deleteMessage() {
+            if (!confirm('Move this message to trash?')) return;
+            try {
+                // TODO: API call to delete
+                window.location.href = '/inbox';
+            } catch (error) {
+                console.error('Failed to delete message:', error);
+            }
+        },
+
+        openMessage(id) {
+            if (id !== this.messageId) {
+                window.location.href = `/message/${id}`;
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

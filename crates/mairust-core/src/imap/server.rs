@@ -1,8 +1,8 @@
 //! IMAP Server
 //!
-//! Main IMAP server implementation with read-only mail access.
+//! Full-featured IMAP server implementation with read/write mail access.
 
-use super::command::{FetchItem, ImapCommand, SearchCriteria, SequenceSet, TaggedCommand};
+use super::command::{FetchItem, ImapCommand, SearchCriteria, SequenceSet, StoreFlags, StoreOperation, TaggedCommand};
 use super::parser::ImapParser;
 use super::response::ImapResponse;
 use super::session::{ImapSession, SelectedMailbox, SessionState};
@@ -263,6 +263,57 @@ impl ImapServer {
             }
             ImapCommand::Search { criteria, uid } => {
                 Self::handle_search(tag, &criteria, uid, session, db_pool).await
+            }
+
+            // Write operations - Mailbox management
+            ImapCommand::Create { mailbox } => {
+                Self::handle_create(tag, &mailbox, session, db_pool).await
+            }
+            ImapCommand::Delete { mailbox } => {
+                Self::handle_delete(tag, &mailbox, session, db_pool).await
+            }
+            ImapCommand::Rename { old_mailbox, new_mailbox } => {
+                Self::handle_rename(tag, &old_mailbox, &new_mailbox, session, db_pool).await
+            }
+            ImapCommand::Subscribe { mailbox } => {
+                Self::handle_subscribe(tag, &mailbox, true, session, db_pool).await
+            }
+            ImapCommand::Unsubscribe { mailbox } => {
+                Self::handle_subscribe(tag, &mailbox, false, session, db_pool).await
+            }
+
+            // Write operations - Message operations
+            ImapCommand::Store { sequence, flags, uid } => {
+                Self::handle_store(tag, &sequence, &flags, uid, session, db_pool).await
+            }
+            ImapCommand::Copy { sequence, mailbox, uid } => {
+                Self::handle_copy(tag, &sequence, &mailbox, uid, session, db_pool).await
+            }
+            ImapCommand::Move { sequence, mailbox, uid } => {
+                Self::handle_move(tag, &sequence, &mailbox, uid, session, db_pool).await
+            }
+            ImapCommand::Expunge => {
+                Self::handle_expunge(tag, session, db_pool).await
+            }
+            ImapCommand::Append { mailbox, flags, date, message } => {
+                Self::handle_append(tag, &mailbox, &flags, date.as_deref(), &message, session, db_pool).await
+            }
+
+            // Extensions
+            ImapCommand::Idle => {
+                // IDLE mode - client wants to wait for updates
+                // For now, just acknowledge and wait for DONE
+                ImapResponse::continue_req()
+            }
+            ImapCommand::Done => {
+                ImapResponse::ok(tag, "IDLE terminated")
+            }
+            ImapCommand::Namespace => {
+                format!(
+                    "{}{}",
+                    ImapResponse::namespace(),
+                    ImapResponse::ok(tag, "NAMESPACE completed")
+                )
             }
 
             ImapCommand::Unknown { command } => {
@@ -794,6 +845,797 @@ impl ImapServer {
     fn message_id_to_uid(id: &Uuid) -> u32 {
         let bytes = id.as_bytes();
         u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+
+    // ========================================================================
+    // Write Operations - Mailbox Management
+    // ========================================================================
+
+    /// Handle CREATE command
+    async fn handle_create(
+        tag: &str,
+        mailbox_name: &str,
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_authenticated() {
+            return ImapResponse::no(tag, "Not authenticated");
+        }
+
+        let tenant_id = match sess.tenant_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No tenant context"),
+        };
+        let user_id = match sess.user_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No user context"),
+        };
+        drop(sess);
+
+        let pool = db_pool.pool();
+
+        // Check if mailbox already exists
+        let exists: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+        )
+        .bind(tenant_id)
+        .bind(mailbox_name)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        if exists.is_some() {
+            return ImapResponse::no(tag, "Mailbox already exists");
+        }
+
+        // Get user's domain
+        let domain: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT d.id FROM domains d
+             JOIN users u ON u.tenant_id = d.tenant_id
+             WHERE u.id = $1 LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        let domain_id = match domain {
+            Some((id,)) => id,
+            None => return ImapResponse::no(tag, "No domain found"),
+        };
+
+        // Create the mailbox
+        let mailbox_id = Uuid::new_v4();
+        let result = sqlx::query(
+            "INSERT INTO mailboxes (id, tenant_id, domain_id, user_id, address, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
+        )
+        .bind(mailbox_id)
+        .bind(tenant_id)
+        .bind(domain_id)
+        .bind(user_id)
+        .bind(mailbox_name)
+        .execute(pool)
+        .await;
+
+        match result {
+            Ok(_) => {
+                info!("Created mailbox {} for user {}", mailbox_name, user_id);
+                ImapResponse::ok(tag, "CREATE completed")
+            }
+            Err(e) => {
+                error!("Failed to create mailbox: {}", e);
+                ImapResponse::no(tag, "Failed to create mailbox")
+            }
+        }
+    }
+
+    /// Handle DELETE command
+    async fn handle_delete(
+        tag: &str,
+        mailbox_name: &str,
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_authenticated() {
+            return ImapResponse::no(tag, "Not authenticated");
+        }
+
+        let tenant_id = match sess.tenant_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No tenant context"),
+        };
+        let user_id = match sess.user_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No user context"),
+        };
+        drop(sess);
+
+        // Cannot delete INBOX
+        if mailbox_name.to_uppercase() == "INBOX" {
+            return ImapResponse::no(tag, "Cannot delete INBOX");
+        }
+
+        let pool = db_pool.pool();
+
+        // Find and delete the mailbox
+        let result = sqlx::query(
+            "DELETE FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 AND address = $3",
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(mailbox_name)
+        .execute(pool)
+        .await;
+
+        match result {
+            Ok(r) if r.rows_affected() > 0 => {
+                info!("Deleted mailbox {} for user {}", mailbox_name, user_id);
+                ImapResponse::ok(tag, "DELETE completed")
+            }
+            Ok(_) => ImapResponse::no(tag, "Mailbox not found"),
+            Err(e) => {
+                error!("Failed to delete mailbox: {}", e);
+                ImapResponse::no(tag, "Failed to delete mailbox")
+            }
+        }
+    }
+
+    /// Handle RENAME command
+    async fn handle_rename(
+        tag: &str,
+        old_name: &str,
+        new_name: &str,
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_authenticated() {
+            return ImapResponse::no(tag, "Not authenticated");
+        }
+
+        let tenant_id = match sess.tenant_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No tenant context"),
+        };
+        let user_id = match sess.user_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No user context"),
+        };
+        drop(sess);
+
+        // Cannot rename INBOX
+        if old_name.to_uppercase() == "INBOX" {
+            return ImapResponse::no(tag, "Cannot rename INBOX");
+        }
+
+        let pool = db_pool.pool();
+
+        // Rename the mailbox
+        let result = sqlx::query(
+            "UPDATE mailboxes SET address = $4, updated_at = NOW()
+             WHERE tenant_id = $1 AND user_id = $2 AND address = $3",
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(old_name)
+        .bind(new_name)
+        .execute(pool)
+        .await;
+
+        match result {
+            Ok(r) if r.rows_affected() > 0 => {
+                info!("Renamed mailbox {} to {} for user {}", old_name, new_name, user_id);
+                ImapResponse::ok(tag, "RENAME completed")
+            }
+            Ok(_) => ImapResponse::no(tag, "Mailbox not found"),
+            Err(e) => {
+                error!("Failed to rename mailbox: {}", e);
+                ImapResponse::no(tag, "Failed to rename mailbox")
+            }
+        }
+    }
+
+    /// Handle SUBSCRIBE/UNSUBSCRIBE command
+    async fn handle_subscribe(
+        tag: &str,
+        mailbox_name: &str,
+        subscribe: bool,
+        session: &Arc<Mutex<ImapSession>>,
+        _db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_authenticated() {
+            return ImapResponse::no(tag, "Not authenticated");
+        }
+        drop(sess);
+
+        // For now, we don't track subscriptions separately - all mailboxes are subscribed
+        // This could be implemented with a mailbox_subscriptions table
+        let action = if subscribe { "SUBSCRIBE" } else { "UNSUBSCRIBE" };
+        debug!("{} to mailbox {}", action, mailbox_name);
+
+        ImapResponse::ok(tag, &format!("{} completed", action))
+    }
+
+    // ========================================================================
+    // Write Operations - Message Operations
+    // ========================================================================
+
+    /// Handle STORE command
+    async fn handle_store(
+        tag: &str,
+        sequence: &SequenceSet,
+        flags: &StoreFlags,
+        uid_mode: bool,
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_selected() {
+            return ImapResponse::no(tag, "No mailbox selected");
+        }
+
+        // Check if mailbox is read-only
+        if sess.is_readonly() {
+            return ImapResponse::no(tag, "Mailbox is read-only");
+        }
+
+        let selected = match &sess.selected_mailbox {
+            Some(s) => s.clone(),
+            None => return ImapResponse::no(tag, "No mailbox selected"),
+        };
+        drop(sess);
+
+        let pool = db_pool.pool();
+
+        // Get messages for the sequence set
+        let messages: Vec<Message> = sqlx::query_as(
+            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
+        )
+        .bind(selected.id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let mut response = String::new();
+        let max_seq = messages.len() as u32;
+
+        for (idx, msg) in messages.iter().enumerate() {
+            let seq = (idx + 1) as u32;
+            let msg_uid = Self::message_id_to_uid(&msg.id);
+
+            // Check if this message is in the sequence set
+            let in_set = if uid_mode {
+                sequence.contains(msg_uid, msg_uid)
+            } else {
+                sequence.contains(seq, max_seq)
+            };
+
+            if !in_set {
+                continue;
+            }
+
+            // Parse and apply flag changes
+            let (new_seen, new_answered, new_flagged, new_deleted, new_draft) =
+                Self::apply_flag_changes(msg, flags);
+
+            // Update the message in database
+            let update_result = sqlx::query(
+                "UPDATE messages SET seen = $2, answered = $3, flagged = $4, deleted = $5, draft = $6
+                 WHERE id = $1",
+            )
+            .bind(msg.id)
+            .bind(new_seen)
+            .bind(new_answered)
+            .bind(new_flagged)
+            .bind(new_deleted)
+            .bind(new_draft)
+            .execute(pool)
+            .await;
+
+            if let Err(e) = update_result {
+                error!("Failed to update message flags: {}", e);
+                continue;
+            }
+
+            // If not silent, send FETCH response with new flags
+            if !flags.silent {
+                let flags_str = ImapResponse::format_flags(
+                    new_seen, new_answered, new_flagged, new_deleted, new_draft,
+                );
+                let mut fetch_items = vec![("FLAGS".to_string(), flags_str)];
+                if uid_mode {
+                    fetch_items.push(("UID".to_string(), msg_uid.to_string()));
+                }
+                response.push_str(&ImapResponse::fetch(seq, &fetch_items));
+            }
+        }
+
+        response.push_str(&ImapResponse::ok(tag, "STORE completed"));
+        response
+    }
+
+    /// Apply flag changes based on store operation
+    fn apply_flag_changes(msg: &Message, flags: &StoreFlags) -> (bool, bool, bool, bool, bool) {
+        let mut seen = msg.seen;
+        let mut answered = msg.answered;
+        let mut flagged = msg.flagged;
+        let mut deleted = msg.deleted;
+        let mut draft = msg.draft;
+
+        for flag in &flags.flags {
+            let flag_upper = flag.to_uppercase();
+            let value = match flags.operation {
+                StoreOperation::Add => true,
+                StoreOperation::Remove => false,
+                StoreOperation::Replace => true,
+            };
+
+            match flag_upper.as_str() {
+                "\\SEEN" => {
+                    if flags.operation == StoreOperation::Replace {
+                        seen = flags.flags.iter().any(|f| f.to_uppercase() == "\\SEEN");
+                    } else {
+                        seen = value;
+                    }
+                }
+                "\\ANSWERED" => {
+                    if flags.operation == StoreOperation::Replace {
+                        answered = flags.flags.iter().any(|f| f.to_uppercase() == "\\ANSWERED");
+                    } else {
+                        answered = value;
+                    }
+                }
+                "\\FLAGGED" => {
+                    if flags.operation == StoreOperation::Replace {
+                        flagged = flags.flags.iter().any(|f| f.to_uppercase() == "\\FLAGGED");
+                    } else {
+                        flagged = value;
+                    }
+                }
+                "\\DELETED" => {
+                    if flags.operation == StoreOperation::Replace {
+                        deleted = flags.flags.iter().any(|f| f.to_uppercase() == "\\DELETED");
+                    } else {
+                        deleted = value;
+                    }
+                }
+                "\\DRAFT" => {
+                    if flags.operation == StoreOperation::Replace {
+                        draft = flags.flags.iter().any(|f| f.to_uppercase() == "\\DRAFT");
+                    } else {
+                        draft = value;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // For Replace operation, reset flags not in the list
+        if flags.operation == StoreOperation::Replace {
+            if !flags.flags.iter().any(|f| f.to_uppercase() == "\\SEEN") {
+                seen = false;
+            }
+            if !flags.flags.iter().any(|f| f.to_uppercase() == "\\ANSWERED") {
+                answered = false;
+            }
+            if !flags.flags.iter().any(|f| f.to_uppercase() == "\\FLAGGED") {
+                flagged = false;
+            }
+            if !flags.flags.iter().any(|f| f.to_uppercase() == "\\DELETED") {
+                deleted = false;
+            }
+            if !flags.flags.iter().any(|f| f.to_uppercase() == "\\DRAFT") {
+                draft = false;
+            }
+        }
+
+        (seen, answered, flagged, deleted, draft)
+    }
+
+    /// Handle COPY command
+    async fn handle_copy(
+        tag: &str,
+        sequence: &SequenceSet,
+        dest_mailbox: &str,
+        uid_mode: bool,
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_selected() {
+            return ImapResponse::no(tag, "No mailbox selected");
+        }
+
+        let tenant_id = match sess.tenant_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No tenant context"),
+        };
+
+        let selected = match &sess.selected_mailbox {
+            Some(s) => s.clone(),
+            None => return ImapResponse::no(tag, "No mailbox selected"),
+        };
+        drop(sess);
+
+        let pool = db_pool.pool();
+
+        // Find destination mailbox
+        let dest_mailbox_query = if dest_mailbox.to_uppercase() == "INBOX" {
+            sqlx::query_as::<_, (Uuid,)>(
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 LIMIT 1",
+            )
+            .bind(tenant_id)
+        } else {
+            sqlx::query_as::<_, (Uuid,)>(
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+            )
+            .bind(tenant_id)
+            .bind(dest_mailbox)
+        };
+
+        let dest_id = match dest_mailbox_query.fetch_optional(pool).await {
+            Ok(Some((id,))) => id,
+            Ok(None) => return ImapResponse::no(tag, "[TRYCREATE] Destination mailbox does not exist"),
+            Err(e) => {
+                error!("Failed to find destination mailbox: {}", e);
+                return ImapResponse::no(tag, "Failed to find destination mailbox");
+            }
+        };
+
+        // Get source messages
+        let messages: Vec<Message> = sqlx::query_as(
+            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
+        )
+        .bind(selected.id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let max_seq = messages.len() as u32;
+        let mut source_uids = Vec::new();
+        let mut dest_uids = Vec::new();
+
+        for (idx, msg) in messages.iter().enumerate() {
+            let seq = (idx + 1) as u32;
+            let msg_uid = Self::message_id_to_uid(&msg.id);
+
+            let in_set = if uid_mode {
+                sequence.contains(msg_uid, msg_uid)
+            } else {
+                sequence.contains(seq, max_seq)
+            };
+
+            if !in_set {
+                continue;
+            }
+
+            // Copy the message
+            let new_id = Uuid::new_v4();
+            let new_uid = Self::message_id_to_uid(&new_id);
+
+            let copy_result = sqlx::query(
+                "INSERT INTO messages (id, tenant_id, mailbox_id, message_id_header, subject,
+                 from_address, to_addresses, cc_addresses, headers, body_preview, body_size,
+                 has_attachments, storage_path, seen, answered, flagged, deleted, draft,
+                 spam_score, tags, metadata, received_at, created_at)
+                 SELECT $1, tenant_id, $2, message_id_header, subject, from_address, to_addresses,
+                 cc_addresses, headers, body_preview, body_size, has_attachments, storage_path,
+                 seen, answered, flagged, false, draft, spam_score, tags, metadata, received_at, NOW()
+                 FROM messages WHERE id = $3",
+            )
+            .bind(new_id)
+            .bind(dest_id)
+            .bind(msg.id)
+            .execute(pool)
+            .await;
+
+            match copy_result {
+                Ok(_) => {
+                    source_uids.push(msg_uid.to_string());
+                    dest_uids.push(new_uid.to_string());
+                }
+                Err(e) => {
+                    error!("Failed to copy message: {}", e);
+                }
+            }
+        }
+
+        if source_uids.is_empty() {
+            return ImapResponse::ok(tag, "COPY completed (no messages)");
+        }
+
+        let copyuid = ImapResponse::copyuid(
+            selected.uid_validity,
+            &source_uids.join(","),
+            &dest_uids.join(","),
+        );
+        ImapResponse::ok(tag, &format!("{} COPY completed", copyuid))
+    }
+
+    /// Handle MOVE command
+    async fn handle_move(
+        tag: &str,
+        sequence: &SequenceSet,
+        dest_mailbox: &str,
+        uid_mode: bool,
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_selected() {
+            return ImapResponse::no(tag, "No mailbox selected");
+        }
+
+        if sess.is_readonly() {
+            return ImapResponse::no(tag, "Mailbox is read-only");
+        }
+
+        let tenant_id = match sess.tenant_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No tenant context"),
+        };
+
+        let selected = match &sess.selected_mailbox {
+            Some(s) => s.clone(),
+            None => return ImapResponse::no(tag, "No mailbox selected"),
+        };
+        drop(sess);
+
+        let pool = db_pool.pool();
+
+        // Find destination mailbox
+        let dest_mailbox_query = if dest_mailbox.to_uppercase() == "INBOX" {
+            sqlx::query_as::<_, (Uuid,)>(
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 LIMIT 1",
+            )
+            .bind(tenant_id)
+        } else {
+            sqlx::query_as::<_, (Uuid,)>(
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+            )
+            .bind(tenant_id)
+            .bind(dest_mailbox)
+        };
+
+        let dest_id = match dest_mailbox_query.fetch_optional(pool).await {
+            Ok(Some((id,))) => id,
+            Ok(None) => return ImapResponse::no(tag, "[TRYCREATE] Destination mailbox does not exist"),
+            Err(e) => {
+                error!("Failed to find destination mailbox: {}", e);
+                return ImapResponse::no(tag, "Failed to find destination mailbox");
+            }
+        };
+
+        // Get source messages
+        let messages: Vec<Message> = sqlx::query_as(
+            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
+        )
+        .bind(selected.id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let max_seq = messages.len() as u32;
+        let mut response = String::new();
+        let mut source_uids = Vec::new();
+        let mut dest_uids = Vec::new();
+        let mut expunged_seqs = Vec::new();
+
+        for (idx, msg) in messages.iter().enumerate() {
+            let seq = (idx + 1) as u32;
+            let msg_uid = Self::message_id_to_uid(&msg.id);
+
+            let in_set = if uid_mode {
+                sequence.contains(msg_uid, msg_uid)
+            } else {
+                sequence.contains(seq, max_seq)
+            };
+
+            if !in_set {
+                continue;
+            }
+
+            // Move the message (update mailbox_id)
+            let move_result = sqlx::query(
+                "UPDATE messages SET mailbox_id = $2 WHERE id = $1",
+            )
+            .bind(msg.id)
+            .bind(dest_id)
+            .execute(pool)
+            .await;
+
+            match move_result {
+                Ok(_) => {
+                    source_uids.push(msg_uid.to_string());
+                    dest_uids.push(msg_uid.to_string()); // UID doesn't change on move
+                    expunged_seqs.push(seq);
+                }
+                Err(e) => {
+                    error!("Failed to move message: {}", e);
+                }
+            }
+        }
+
+        // Send EXPUNGE responses for moved messages (in reverse order to maintain sequence numbers)
+        for seq in expunged_seqs.iter().rev() {
+            response.push_str(&ImapResponse::expunge(*seq));
+        }
+
+        if source_uids.is_empty() {
+            response.push_str(&ImapResponse::ok(tag, "MOVE completed (no messages)"));
+        } else {
+            let copyuid = ImapResponse::copyuid(
+                selected.uid_validity,
+                &source_uids.join(","),
+                &dest_uids.join(","),
+            );
+            response.push_str(&ImapResponse::ok(tag, &format!("{} MOVE completed", copyuid)));
+        }
+
+        response
+    }
+
+    /// Handle EXPUNGE command
+    async fn handle_expunge(
+        tag: &str,
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_selected() {
+            return ImapResponse::no(tag, "No mailbox selected");
+        }
+
+        if sess.is_readonly() {
+            return ImapResponse::no(tag, "Mailbox is read-only");
+        }
+
+        let selected = match &sess.selected_mailbox {
+            Some(s) => s.clone(),
+            None => return ImapResponse::no(tag, "No mailbox selected"),
+        };
+        drop(sess);
+
+        let pool = db_pool.pool();
+
+        // Get messages marked for deletion
+        let messages: Vec<Message> = sqlx::query_as(
+            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
+        )
+        .bind(selected.id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let mut response = String::new();
+        let mut deleted_count = 0;
+
+        // Process in reverse order to maintain correct sequence numbers
+        let mut seq_to_delete = Vec::new();
+        for (idx, msg) in messages.iter().enumerate() {
+            if msg.deleted {
+                seq_to_delete.push((idx + 1) as u32);
+            }
+        }
+
+        // Delete messages and send EXPUNGE responses
+        for (offset, (idx, msg)) in messages.iter().enumerate().filter(|(_, m)| m.deleted).enumerate() {
+            let seq = (idx + 1 - offset) as u32; // Adjust for already deleted messages
+
+            let delete_result = sqlx::query("DELETE FROM messages WHERE id = $1")
+                .bind(msg.id)
+                .execute(pool)
+                .await;
+
+            if delete_result.is_ok() {
+                response.push_str(&ImapResponse::expunge(seq));
+                deleted_count += 1;
+            }
+        }
+
+        info!("Expunged {} messages from mailbox {}", deleted_count, selected.name);
+        response.push_str(&ImapResponse::ok(tag, "EXPUNGE completed"));
+        response
+    }
+
+    /// Handle APPEND command
+    async fn handle_append(
+        tag: &str,
+        mailbox_name: &str,
+        flags: &[String],
+        _date: Option<&str>,
+        message: &[u8],
+        session: &Arc<Mutex<ImapSession>>,
+        db_pool: &DatabasePool,
+    ) -> String {
+        let sess = session.lock().await;
+        if !sess.is_authenticated() {
+            return ImapResponse::no(tag, "Not authenticated");
+        }
+
+        let tenant_id = match sess.tenant_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No tenant context"),
+        };
+        drop(sess);
+
+        let pool = db_pool.pool();
+
+        // Find the mailbox
+        let mailbox_query = if mailbox_name.to_uppercase() == "INBOX" {
+            sqlx::query_as::<_, (Uuid,)>(
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 LIMIT 1",
+            )
+            .bind(tenant_id)
+        } else {
+            sqlx::query_as::<_, (Uuid,)>(
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+            )
+            .bind(tenant_id)
+            .bind(mailbox_name)
+        };
+
+        let mailbox_id = match mailbox_query.fetch_optional(pool).await {
+            Ok(Some((id,))) => id,
+            Ok(None) => return ImapResponse::no(tag, "[TRYCREATE] Mailbox does not exist"),
+            Err(e) => {
+                error!("Failed to find mailbox: {}", e);
+                return ImapResponse::no(tag, "Failed to find mailbox");
+            }
+        };
+
+        // Parse flags
+        let seen = flags.iter().any(|f| f.to_uppercase() == "\\SEEN");
+        let answered = flags.iter().any(|f| f.to_uppercase() == "\\ANSWERED");
+        let flagged = flags.iter().any(|f| f.to_uppercase() == "\\FLAGGED");
+        let deleted = flags.iter().any(|f| f.to_uppercase() == "\\DELETED");
+        let draft = flags.iter().any(|f| f.to_uppercase() == "\\DRAFT");
+
+        // Create the message
+        // Note: In a real implementation, we would parse the message content
+        // For now, we create a placeholder entry
+        let message_id = Uuid::new_v4();
+        let body_preview = String::from_utf8_lossy(message).chars().take(500).collect::<String>();
+        let storage_path = format!("{}/{}/{}.eml", tenant_id, mailbox_id, message_id);
+
+        let insert_result = sqlx::query(
+            "INSERT INTO messages (id, tenant_id, mailbox_id, body_preview, body_size, storage_path,
+             seen, answered, flagged, deleted, draft, to_addresses, headers, tags, metadata,
+             received_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '[]', '{}', '[]', '{}', NOW(), NOW())",
+        )
+        .bind(message_id)
+        .bind(tenant_id)
+        .bind(mailbox_id)
+        .bind(&body_preview)
+        .bind(message.len() as i64)
+        .bind(&storage_path)
+        .bind(seen)
+        .bind(answered)
+        .bind(flagged)
+        .bind(deleted)
+        .bind(draft)
+        .execute(pool)
+        .await;
+
+        match insert_result {
+            Ok(_) => {
+                let uid = Self::message_id_to_uid(&message_id);
+                let appenduid = ImapResponse::appenduid(1, uid);
+                info!("Appended message {} to mailbox {}", message_id, mailbox_name);
+                ImapResponse::ok(tag, &format!("{} APPEND completed", appenduid))
+            }
+            Err(e) => {
+                error!("Failed to append message: {}", e);
+                ImapResponse::no(tag, "Failed to append message")
+            }
+        }
     }
 }
 

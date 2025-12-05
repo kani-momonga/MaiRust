@@ -1,0 +1,43 @@
+[package]
+name = "mairust-web"
+description = "Web UI for MaiRust mail server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mairust-common = { workspace = true }
+mairust-storage = { workspace = true }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["fs", "cors", "compression-gzip"] }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# UUID & Time
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Template engine
+minijinja = { workspace = true }
+
+# Static files
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

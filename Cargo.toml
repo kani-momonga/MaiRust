@@ -5,6 +5,7 @@ members = [
     "crates/mairust-storage",
     "crates/mairust-core",
     "crates/mairust-api",
+    "crates/mairust-web",
 ]
 
 [workspace.package]
@@ -80,11 +81,17 @@ prometheus = "0.13"
 pretty_assertions = "1.4"
 wiremock = "0.5"
 
+# Web UI
+minijinja = { version = "1.0", features = ["loader"] }
+rust-embed = "8.2"
+mime_guess = "2.0"
+
 # Internal crates
 mairust-common = { path = "crates/mairust-common" }
 mairust-storage = { path = "crates/mairust-storage" }
 mairust-core = { path = "crates/mairust-core" }
 mairust-api = { path = "crates/mairust-api" }
+mairust-web = { path = "crates/mairust-web" }
 
 [profile.release]
 lto = true

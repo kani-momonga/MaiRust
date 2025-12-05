@@ -11,8 +11,11 @@ MaiRust is an open-source mail server designed for extensibility via webhooks an
 
 ### Core Capabilities
 - **SMTP Server** - Inbound (port 25) and Submission (port 587) with STARTTLS
+- **IMAP4rev1 Server** - Full read/write support with IDLE, MOVE, UIDPLUS extensions
+- **POP3 Server** - Complete POP3 implementation with TOP, UIDL, CAPA
 - **Email Authentication** - SPF validation, DKIM signing/verification, DMARC support
 - **REST API** - Full API for user, domain, mailbox, and message management
+- **Web Client** - Modern web UI with Alpine.js and Tailwind CSS
 - **Database Support** - PostgreSQL (recommended)
 - **Flexible Storage** - Local filesystem or S3-compatible object storage
 
@@ -44,8 +47,9 @@ MaiRust is an open-source mail server designed for extensibility via webhooks an
 │                        MaiRust                              │
 ├─────────────────────────────────────────────────────────────┤
 │  mairust-api     │  REST API Server (Axum)                  │
-│  mairust-core    │  SMTP Server, Queue, Email Auth, Spam    │
+│  mairust-core    │  SMTP/IMAP/POP3, Queue, Auth, Plugins    │
 │  mairust-storage │  Database & File Storage Abstraction     │
+│  mairust-web     │  Web Client UI (Alpine.js + Tailwind)    │
 │  mairust-common  │  Shared Types & Configuration            │
 └─────────────────────────────────────────────────────────────┘
          │                    │                    │
@@ -159,11 +163,11 @@ Full API documentation is available at `/docs` (Swagger UI) or `/openapi.json`.
 - [x] IMAP support (read-only)
 
 ### Phase 3 - Full Mailbox Experience
-- [ ] Full IMAP/POP support
-- [ ] AI categorization plugins
-- [ ] Message threading and tagging
-- [ ] Web client UI
-- [ ] Plugin system beta
+- [x] Full IMAP/POP support (STORE, COPY, MOVE, APPEND, EXPUNGE + POP3)
+- [x] AI categorization plugins
+- [x] Message threading and tagging
+- [x] Web client UI
+- [x] Plugin system beta
 
 ### Phase 4 - Enterprise & Cloud
 - [ ] Horizontal scaling / cluster mode

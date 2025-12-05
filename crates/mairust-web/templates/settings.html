@@ -1,0 +1,423 @@
+{% extends "base" %}
+
+{% block content %}
+<div x-data="settings()" x-init="loadSettings()" class="max-w-4xl mx-auto">
+    <h1 class="text-2xl font-semibold mb-6">Settings</h1>
+
+    <!-- Tab Navigation -->
+    <div class="flex border-b mb-6">
+        <button @click="tab = 'general'"
+                :class="tab === 'general' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-500'"
+                class="px-4 py-2 font-medium">
+            General
+        </button>
+        <button @click="tab = 'filters'"
+                :class="tab === 'filters' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-500'"
+                class="px-4 py-2 font-medium">
+            Filters & Rules
+        </button>
+        <button @click="tab = 'categories'"
+                :class="tab === 'categories' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-500'"
+                class="px-4 py-2 font-medium">
+            Categories
+        </button>
+        <button @click="tab = 'tags'"
+                :class="tab === 'tags' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-500'"
+                class="px-4 py-2 font-medium">
+            Tags
+        </button>
+        <button @click="tab = 'plugins'"
+                :class="tab === 'plugins' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-500'"
+                class="px-4 py-2 font-medium">
+            Plugins
+        </button>
+    </div>
+
+    <!-- General Settings -->
+    <div x-show="tab === 'general'" class="bg-white rounded-lg shadow p-6">
+        <h2 class="text-lg font-semibold mb-4">General Settings</h2>
+
+        <div class="space-y-6">
+            <!-- Display Name -->
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                <input type="text" x-model="general.displayName"
+                       class="w-full px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500">
+            </div>
+
+            <!-- Signature -->
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Email Signature</label>
+                <textarea x-model="general.signature" rows="4"
+                          class="w-full px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500"></textarea>
+            </div>
+
+            <!-- Messages per page -->
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Messages per page</label>
+                <select x-model="general.messagesPerPage"
+                        class="px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500">
+                    <option value="25">25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                </select>
+            </div>
+
+            <!-- Auto-mark as read -->
+            <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="general.autoMarkRead" id="autoMarkRead"
+                       class="w-4 h-4 rounded">
+                <label for="autoMarkRead" class="text-sm text-gray-700">
+                    Automatically mark messages as read after viewing
+                </label>
+            </div>
+
+            <!-- Conversation view -->
+            <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="general.conversationView" id="conversationView"
+                       class="w-4 h-4 rounded">
+                <label for="conversationView" class="text-sm text-gray-700">
+                    Enable conversation view (group messages by thread)
+                </label>
+            </div>
+        </div>
+
+        <div class="mt-6 flex justify-end">
+            <button @click="saveGeneral()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                Save Changes
+            </button>
+        </div>
+    </div>
+
+    <!-- Filters & Rules -->
+    <div x-show="tab === 'filters'" class="bg-white rounded-lg shadow p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">Filters & Rules</h2>
+            <button @click="addFilter()" class="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600">
+                Add Filter
+            </button>
+        </div>
+
+        <div class="space-y-4">
+            <template x-for="(filter, index) in filters" :key="filter.id">
+                <div class="border rounded p-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="font-medium" x-text="filter.name"></span>
+                        <div class="flex gap-2">
+                            <button @click="editFilter(index)" class="text-blue-500 hover:underline text-sm">Edit</button>
+                            <button @click="deleteFilter(index)" class="text-red-500 hover:underline text-sm">Delete</button>
+                        </div>
+                    </div>
+                    <div class="text-sm text-gray-600">
+                        <span>If </span>
+                        <span x-text="filter.condition"></span>
+                        <span> then </span>
+                        <span x-text="filter.action"></span>
+                    </div>
+                </div>
+            </template>
+
+            <div x-show="filters.length === 0" class="text-gray-500 text-center py-8">
+                No filters configured. Click "Add Filter" to create one.
+            </div>
+        </div>
+    </div>
+
+    <!-- Categories -->
+    <div x-show="tab === 'categories'" class="bg-white rounded-lg shadow p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">AI Categories</h2>
+            <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="categoriesEnabled" id="categoriesEnabled"
+                       class="w-4 h-4 rounded">
+                <label for="categoriesEnabled" class="text-sm text-gray-700">Enable AI categorization</label>
+            </div>
+        </div>
+
+        <div class="space-y-4">
+            <template x-for="category in categories" :key="category.id">
+                <div class="flex items-center gap-4 p-3 border rounded">
+                    <div class="w-4 h-4 rounded" :style="`background-color: ${category.color}`"></div>
+                    <div class="flex-1">
+                        <span class="font-medium" x-text="category.name"></span>
+                        <p class="text-sm text-gray-500" x-text="category.description"></p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <input type="checkbox" :checked="category.enabled"
+                               @change="toggleCategory(category.id)"
+                               class="w-4 h-4 rounded">
+                        <span class="text-sm text-gray-600">Enabled</span>
+                    </div>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <!-- Tags -->
+    <div x-show="tab === 'tags'" class="bg-white rounded-lg shadow p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">Tags</h2>
+            <button @click="showTagModal = true" class="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600">
+                Add Tag
+            </button>
+        </div>
+
+        <div class="space-y-2">
+            <template x-for="tag in tags" :key="tag.id">
+                <div class="flex items-center gap-4 p-3 border rounded hover:bg-gray-50">
+                    <div class="w-4 h-4 rounded-full" :style="`background-color: ${tag.color}`"></div>
+                    <span class="flex-1" x-text="tag.name"></span>
+                    <button @click="editTag(tag)" class="text-blue-500 hover:underline text-sm">Edit</button>
+                    <button @click="deleteTag(tag.id)" class="text-red-500 hover:underline text-sm">Delete</button>
+                </div>
+            </template>
+
+            <div x-show="tags.length === 0" class="text-gray-500 text-center py-8">
+                No tags created. Click "Add Tag" to create one.
+            </div>
+        </div>
+    </div>
+
+    <!-- Plugins -->
+    <div x-show="tab === 'plugins'" class="bg-white rounded-lg shadow p-6">
+        <h2 class="text-lg font-semibold mb-4">Plugins</h2>
+
+        <div class="space-y-4">
+            <template x-for="plugin in plugins" :key="plugin.id">
+                <div class="border rounded p-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <span class="font-medium" x-text="plugin.name"></span>
+                            <span class="text-sm text-gray-500 ml-2" x-text="'v' + plugin.version"></span>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" :checked="plugin.enabled"
+                                   @change="togglePlugin(plugin.id)"
+                                   class="sr-only peer">
+                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                        </label>
+                    </div>
+                    <p class="text-sm text-gray-600 mt-1" x-text="plugin.description"></p>
+                    <div class="mt-2 flex items-center gap-4 text-sm">
+                        <span :class="plugin.status === 'active' ? 'text-green-600' : 'text-gray-500'">
+                            <span class="inline-block w-2 h-2 rounded-full mr-1"
+                                  :class="plugin.status === 'active' ? 'bg-green-500' : 'bg-gray-400'"></span>
+                            <span x-text="plugin.status"></span>
+                        </span>
+                        <button @click="configurePlugin(plugin.id)"
+                                x-show="plugin.configurable"
+                                class="text-blue-500 hover:underline">Configure</button>
+                    </div>
+                </div>
+            </template>
+
+            <div x-show="plugins.length === 0" class="text-gray-500 text-center py-8">
+                No plugins installed.
+            </div>
+        </div>
+    </div>
+
+    <!-- Tag Modal -->
+    <div x-show="showTagModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg shadow-lg p-6 w-96" @click.outside="showTagModal = false">
+            <h3 class="text-lg font-semibold mb-4" x-text="editingTag ? 'Edit Tag' : 'Add Tag'"></h3>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                    <input type="text" x-model="tagForm.name"
+                           class="w-full px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Color</label>
+                    <input type="color" x-model="tagForm.color"
+                           class="w-full h-10 rounded cursor-pointer">
+                </div>
+            </div>
+            <div class="mt-6 flex justify-end gap-2">
+                <button @click="showTagModal = false" class="px-4 py-2 bg-gray-100 rounded hover:bg-gray-200">
+                    Cancel
+                </button>
+                <button @click="saveTag()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                    Save
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status message -->
+    <div x-show="message" x-transition
+         :class="messageType === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'"
+         class="fixed bottom-4 right-4 p-4 rounded shadow-lg">
+        <span x-text="message"></span>
+    </div>
+</div>
+
+<script>
+function settings() {
+    return {
+        tab: 'general',
+        message: '',
+        messageType: '',
+
+        // General settings
+        general: {
+            displayName: '',
+            signature: '',
+            messagesPerPage: 50,
+            autoMarkRead: true,
+            conversationView: true
+        },
+
+        // Filters
+        filters: [],
+
+        // Categories
+        categoriesEnabled: true,
+        categories: [],
+
+        // Tags
+        tags: [],
+        showTagModal: false,
+        editingTag: null,
+        tagForm: { name: '', color: '#3B82F6' },
+
+        // Plugins
+        plugins: [],
+
+        async loadSettings() {
+            try {
+                // TODO: Load from API
+                // Demo data
+                this.general = {
+                    displayName: 'User',
+                    signature: 'Best regards,\nUser',
+                    messagesPerPage: 50,
+                    autoMarkRead: true,
+                    conversationView: true
+                };
+
+                this.filters = [
+                    { id: '1', name: 'Newsletter to folder', condition: 'Subject contains "newsletter"', action: 'Move to Newsletters folder' }
+                ];
+
+                this.categories = [
+                    { id: '1', name: 'Primary', description: 'Important personal messages', color: '#4285F4', enabled: true },
+                    { id: '2', name: 'Social', description: 'Social network notifications', color: '#34A853', enabled: true },
+                    { id: '3', name: 'Promotions', description: 'Marketing emails', color: '#FBBC05', enabled: true },
+                    { id: '4', name: 'Updates', description: 'Automated notifications', color: '#EA4335', enabled: true }
+                ];
+
+                this.tags = [
+                    { id: '1', name: 'Important', color: '#EF4444' },
+                    { id: '2', name: 'Work', color: '#3B82F6' },
+                    { id: '3', name: 'Personal', color: '#10B981' }
+                ];
+
+                this.plugins = [
+                    {
+                        id: 'mairust.builtin.categorizer',
+                        name: 'AI Categorizer',
+                        version: '1.0.0',
+                        description: 'Automatically categorizes incoming emails using AI',
+                        enabled: true,
+                        status: 'active',
+                        configurable: true
+                    }
+                ];
+
+            } catch (error) {
+                this.showMessage('Failed to load settings', 'error');
+            }
+        },
+
+        async saveGeneral() {
+            try {
+                // TODO: Save to API
+                this.showMessage('Settings saved successfully', 'success');
+            } catch (error) {
+                this.showMessage('Failed to save settings', 'error');
+            }
+        },
+
+        addFilter() {
+            // TODO: Open filter editor modal
+            alert('Filter editor not yet implemented');
+        },
+
+        editFilter(index) {
+            // TODO: Open filter editor modal
+            alert('Filter editor not yet implemented');
+        },
+
+        deleteFilter(index) {
+            if (confirm('Delete this filter?')) {
+                this.filters.splice(index, 1);
+            }
+        },
+
+        toggleCategory(id) {
+            const category = this.categories.find(c => c.id === id);
+            if (category) {
+                category.enabled = !category.enabled;
+            }
+        },
+
+        editTag(tag) {
+            this.editingTag = tag;
+            this.tagForm = { name: tag.name, color: tag.color };
+            this.showTagModal = true;
+        },
+
+        async saveTag() {
+            if (!this.tagForm.name) return;
+
+            if (this.editingTag) {
+                // Update existing tag
+                this.editingTag.name = this.tagForm.name;
+                this.editingTag.color = this.tagForm.color;
+            } else {
+                // Create new tag
+                this.tags.push({
+                    id: Date.now().toString(),
+                    name: this.tagForm.name,
+                    color: this.tagForm.color
+                });
+            }
+
+            this.showTagModal = false;
+            this.editingTag = null;
+            this.tagForm = { name: '', color: '#3B82F6' };
+            this.showMessage('Tag saved', 'success');
+        },
+
+        async deleteTag(id) {
+            if (confirm('Delete this tag?')) {
+                this.tags = this.tags.filter(t => t.id !== id);
+                this.showMessage('Tag deleted', 'success');
+            }
+        },
+
+        async togglePlugin(id) {
+            const plugin = this.plugins.find(p => p.id === id);
+            if (plugin) {
+                plugin.enabled = !plugin.enabled;
+                plugin.status = plugin.enabled ? 'active' : 'disabled';
+            }
+        },
+
+        configurePlugin(id) {
+            // TODO: Open plugin configuration modal
+            alert('Plugin configuration not yet implemented');
+        },
+
+        showMessage(msg, type) {
+            this.message = msg;
+            this.messageType = type;
+            setTimeout(() => {
+                this.message = '';
+            }, 3000);
+        }
+    };
+}
+</script>
+{% endblock %}

@@ -1,0 +1,217 @@
+{% extends "base" %}
+
+{% block content %}
+<div x-data="compose()" class="max-w-4xl mx-auto">
+    <div class="bg-white rounded-lg shadow">
+        <!-- Header -->
+        <div class="border-b p-4 flex items-center justify-between">
+            <h1 class="text-xl font-semibold">New Message</h1>
+            <div class="flex gap-2">
+                <button @click="saveDraft()" class="px-4 py-2 bg-gray-100 rounded hover:bg-gray-200">
+                    Save Draft
+                </button>
+                <button @click="send()" :disabled="sending"
+                        class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50">
+                    <span x-show="!sending">Send</span>
+                    <span x-show="sending">Sending...</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Form -->
+        <form @submit.prevent="send()" class="p-4 space-y-4">
+            <!-- To -->
+            <div class="flex items-center border-b pb-2">
+                <label class="w-20 text-gray-600">To:</label>
+                <input type="text" x-model="to"
+                       class="flex-1 outline-none"
+                       placeholder="recipient@example.com"
+                       required>
+            </div>
+
+            <!-- CC -->
+            <div class="flex items-center border-b pb-2" x-show="showCc">
+                <label class="w-20 text-gray-600">Cc:</label>
+                <input type="text" x-model="cc"
+                       class="flex-1 outline-none"
+                       placeholder="cc@example.com">
+            </div>
+
+            <!-- BCC -->
+            <div class="flex items-center border-b pb-2" x-show="showBcc">
+                <label class="w-20 text-gray-600">Bcc:</label>
+                <input type="text" x-model="bcc"
+                       class="flex-1 outline-none"
+                       placeholder="bcc@example.com">
+            </div>
+
+            <!-- CC/BCC toggle -->
+            <div class="flex gap-4 text-sm" x-show="!showCc || !showBcc">
+                <button type="button" @click="showCc = true" x-show="!showCc" class="text-blue-500 hover:underline">
+                    Add Cc
+                </button>
+                <button type="button" @click="showBcc = true" x-show="!showBcc" class="text-blue-500 hover:underline">
+                    Add Bcc
+                </button>
+            </div>
+
+            <!-- Subject -->
+            <div class="flex items-center border-b pb-2">
+                <label class="w-20 text-gray-600">Subject:</label>
+                <input type="text" x-model="subject"
+                       class="flex-1 outline-none"
+                       placeholder="Subject">
+            </div>
+
+            <!-- Body -->
+            <div>
+                <textarea x-model="body" rows="15"
+                          class="w-full outline-none resize-none p-2 border rounded"
+                          placeholder="Write your message..."></textarea>
+            </div>
+
+            <!-- Attachments -->
+            <div class="border-t pt-4">
+                <div class="flex items-center gap-4 mb-2">
+                    <label class="cursor-pointer px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">
+                        <span>Attach Files</span>
+                        <input type="file" multiple @change="addAttachments($event)" class="hidden">
+                    </label>
+                    <span class="text-sm text-gray-500" x-text="attachments.length + ' file(s) attached'"></span>
+                </div>
+                <div class="space-y-2">
+                    <template x-for="(file, index) in attachments" :key="index">
+                        <div class="flex items-center gap-2 bg-gray-50 p-2 rounded">
+                            <span class="flex-1 text-sm truncate" x-text="file.name"></span>
+                            <span class="text-xs text-gray-500" x-text="formatSize(file.size)"></span>
+                            <button type="button" @click="removeAttachment(index)" class="text-red-500 hover:text-red-700">
+                                &times;
+                            </button>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <!-- Error/Success message -->
+    <div x-show="message" x-transition
+         :class="messageType === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'"
+         class="mt-4 p-4 rounded">
+        <span x-text="message"></span>
+    </div>
+</div>
+
+<script>
+function compose() {
+    return {
+        to: '',
+        cc: '',
+        bcc: '',
+        subject: '',
+        body: '',
+        showCc: false,
+        showBcc: false,
+        attachments: [],
+        sending: false,
+        message: '',
+        messageType: '',
+
+        // Check for reply/forward params
+        init() {
+            const params = new URLSearchParams(window.location.search);
+            const replyTo = params.get('replyTo');
+            const forward = params.get('forward');
+
+            if (replyTo) {
+                this.loadReply(replyTo);
+            } else if (forward) {
+                this.loadForward(forward);
+            }
+        },
+
+        async loadReply(messageId) {
+            try {
+                // TODO: Fetch original message and populate reply
+                // const response = await fetch(`${window.API_URL}/messages/${messageId}`);
+                // const msg = await response.json();
+                // this.to = msg.from_address;
+                // this.subject = msg.subject.startsWith('Re:') ? msg.subject : `Re: ${msg.subject}`;
+                // this.body = `\n\n--- Original Message ---\n${msg.body}`;
+            } catch (error) {
+                console.error('Failed to load message for reply:', error);
+            }
+        },
+
+        async loadForward(messageId) {
+            try {
+                // TODO: Fetch original message and populate forward
+            } catch (error) {
+                console.error('Failed to load message for forward:', error);
+            }
+        },
+
+        addAttachments(event) {
+            const files = Array.from(event.target.files);
+            this.attachments = [...this.attachments, ...files];
+        },
+
+        removeAttachment(index) {
+            this.attachments.splice(index, 1);
+        },
+
+        formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        },
+
+        async saveDraft() {
+            try {
+                // TODO: Save to drafts folder via API
+                this.showMessage('Draft saved', 'success');
+            } catch (error) {
+                this.showMessage('Failed to save draft', 'error');
+            }
+        },
+
+        async send() {
+            if (!this.to) {
+                this.showMessage('Please enter a recipient', 'error');
+                return;
+            }
+
+            this.sending = true;
+            try {
+                // TODO: Send via API
+                // const formData = new FormData();
+                // formData.append('to', this.to);
+                // formData.append('cc', this.cc);
+                // formData.append('bcc', this.bcc);
+                // formData.append('subject', this.subject);
+                // formData.append('body', this.body);
+                // this.attachments.forEach(f => formData.append('attachments', f));
+                // await fetch(`${window.API_URL}/send`, { method: 'POST', body: formData });
+
+                this.showMessage('Message sent successfully!', 'success');
+                setTimeout(() => {
+                    window.location.href = '/inbox';
+                }, 1500);
+            } catch (error) {
+                this.showMessage('Failed to send message: ' + error.message, 'error');
+            } finally {
+                this.sending = false;
+            }
+        },
+
+        showMessage(msg, type) {
+            this.message = msg;
+            this.messageType = type;
+            setTimeout(() => {
+                this.message = '';
+            }, 5000);
+        }
+    };
+}
+</script>
+{% endblock %}

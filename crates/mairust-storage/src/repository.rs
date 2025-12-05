@@ -10,6 +10,9 @@ pub mod hooks;
 pub mod domain_aliases;
 pub mod domain_settings;
 pub mod policies;
+pub mod threads;
+pub mod tags;
+pub mod categories;
 
 // Re-export concrete repository implementations with simple names
 pub use api_keys::DbApiKeyRepository as ApiKeyRepository;
@@ -22,6 +25,9 @@ pub use hooks::DbHookRepository as HookRepository;
 pub use domain_aliases::DbDomainAliasRepository as DomainAliasRepository;
 pub use domain_settings::DbDomainSettingsRepository as DomainSettingsRepository;
 pub use policies::DbPolicyRepository as PolicyRepository;
+pub use threads::ThreadRepository;
+pub use tags::TagRepository;
+pub use categories::CategoryRepository;
 
 // Re-export repository traits
 pub use api_keys::ApiKeyRepository as ApiKeyRepositoryTrait;

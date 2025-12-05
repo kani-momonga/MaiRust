@@ -1,6 +1,6 @@
 //! IMAP Command definitions
 //!
-//! Defines the IMAP commands supported by this read-only server.
+//! Defines the IMAP commands supported by this server (read and write operations).
 
 use serde::{Deserialize, Serialize};
 
@@ -261,6 +261,25 @@ pub enum SearchCriteria {
     And(Vec<SearchCriteria>),
 }
 
+/// Store operation type
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreOperation {
+    /// Replace flags
+    Replace,
+    /// Add flags
+    Add,
+    /// Remove flags
+    Remove,
+}
+
+/// Store flags specification
+#[derive(Debug, Clone)]
+pub struct StoreFlags {
+    pub operation: StoreOperation,
+    pub silent: bool,
+    pub flags: Vec<String>,
+}
+
 /// IMAP Command
 #[derive(Debug, Clone)]
 pub enum ImapCommand {
@@ -276,17 +295,32 @@ pub enum ImapCommand {
     // Authenticated state
     Select { mailbox: String },
     Examine { mailbox: String },
+    Create { mailbox: String },
+    Delete { mailbox: String },
+    Rename { old_mailbox: String, new_mailbox: String },
+    Subscribe { mailbox: String },
+    Unsubscribe { mailbox: String },
     List { reference: String, pattern: String },
     Lsub { reference: String, pattern: String },
     Status { mailbox: String, items: Vec<String> },
+    Append { mailbox: String, flags: Vec<String>, date: Option<String>, message: Vec<u8> },
     Close,
 
     // Selected state
     Check,
     Fetch { sequence: SequenceSet, items: Vec<FetchItem>, uid: bool },
     Search { criteria: SearchCriteria, uid: bool },
+    Store { sequence: SequenceSet, flags: StoreFlags, uid: bool },
+    Copy { sequence: SequenceSet, mailbox: String, uid: bool },
+    Move { sequence: SequenceSet, mailbox: String, uid: bool },
+    Expunge,
 
-    // UID variants are handled via uid flag in Fetch/Search
+    // Extensions
+    Idle,
+    Done,
+    Namespace,
+
+    // UID variants are handled via uid flag in Fetch/Search/Store/Copy/Move
 
     // Unknown command
     Unknown { command: String },
