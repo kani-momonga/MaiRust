@@ -1643,6 +1643,7 @@ dependencies = [
  "hex",
  "hmac",
  "mairust-common",
+ "mairust-core",
  "mairust-storage",
  "pretty_assertions",
  "prometheus",

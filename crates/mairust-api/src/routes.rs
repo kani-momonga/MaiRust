@@ -2,7 +2,7 @@
 
 use axum::{
     middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use mairust_storage::DatabasePool;
@@ -10,7 +10,10 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::{auth_middleware, AppState};
-use crate::handlers::{domains, health, hooks, mailboxes, messages, send, tenants, users};
+use crate::handlers::{
+    admin, domain_aliases, domain_settings, domains, health, hooks, mailboxes, messages, policies,
+    search, send, tenants, users,
+};
 use crate::openapi::create_openapi_routes;
 
 /// Create the API router
@@ -78,14 +81,62 @@ pub fn create_router(db_pool: DatabasePool) -> Router {
         .route("/queue", get(send::get_send_queue))
         .route("/:message_id/status", get(send::get_message_status));
 
+    // Domain alias routes
+    let domain_alias_routes = Router::new()
+        .route("/", get(domain_aliases::list_domain_aliases))
+        .route("/", post(domain_aliases::create_domain_alias))
+        .route("/:alias_id", get(domain_aliases::get_domain_alias))
+        .route("/:alias_id", delete(domain_aliases::delete_domain_alias))
+        .route("/:alias_id/enable", post(domain_aliases::enable_domain_alias))
+        .route("/:alias_id/disable", post(domain_aliases::disable_domain_alias));
+
+    // Domain settings routes
+    let domain_settings_routes = Router::new()
+        .route("/", get(domain_settings::get_domain_settings))
+        .route("/", put(domain_settings::update_domain_settings))
+        .route("/catch-all", post(domain_settings::enable_catch_all))
+        .route("/catch-all", delete(domain_settings::disable_catch_all));
+
+    // Policy routes
+    let policy_routes = Router::new()
+        .route("/", get(policies::list_policies))
+        .route("/", post(policies::create_policy))
+        .route("/:policy_id", get(policies::get_policy))
+        .route("/:policy_id", put(policies::update_policy))
+        .route("/:policy_id", delete(policies::delete_policy))
+        .route("/:policy_id/enable", post(policies::enable_policy))
+        .route("/:policy_id/disable", post(policies::disable_policy));
+
+    // Search routes
+    let search_routes = Router::new()
+        .route("/", get(search::search_messages))
+        .route("/status", get(search::search_status))
+        .route("/reindex", post(search::reindex_messages));
+
+    // Admin dashboard routes (super admin)
+    let admin_system_routes = Router::new()
+        .route("/stats", get(admin::get_system_stats))
+        .route("/tenants", get(admin::list_all_tenants_summary));
+
+    // Tenant admin routes
+    let tenant_admin_routes = Router::new()
+        .route("/usage", get(admin::get_tenant_usage))
+        .route("/audit-logs", get(admin::list_audit_logs));
+
     // API v1 routes with authentication
     let api_v1 = Router::new()
         .nest("/messages", message_routes)
         .nest("/admin/tenants", tenant_routes)
+        .nest("/admin/system", admin_system_routes)
+        .nest("/tenants/:tenant_id/admin", tenant_admin_routes)
         .nest("/tenants/:tenant_id/users", user_routes)
         .nest("/tenants/:tenant_id/domains", domain_routes)
+        .nest("/tenants/:tenant_id/domains/:domain_id/settings", domain_settings_routes)
+        .nest("/tenants/:tenant_id/domain-aliases", domain_alias_routes)
         .nest("/tenants/:tenant_id/mailboxes", mailbox_routes)
         .nest("/tenants/:tenant_id/hooks", hook_routes)
+        .nest("/tenants/:tenant_id/policies", policy_routes)
+        .nest("/tenants/:tenant_id/search", search_routes)
         .nest("/tenants/:tenant_id/send", send_routes)
         .layer(middleware::from_fn_with_state(
             state.clone(),

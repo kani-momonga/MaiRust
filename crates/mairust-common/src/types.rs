@@ -25,6 +25,12 @@ pub type PluginId = String;
 /// Unique identifier for hooks
 pub type HookId = Uuid;
 
+/// Unique identifier for domain aliases
+pub type DomainAliasId = Uuid;
+
+/// Unique identifier for policies
+pub type PolicyId = Uuid;
+
 /// Email address
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EmailAddress {
