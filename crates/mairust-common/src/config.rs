@@ -39,6 +39,18 @@ pub struct Config {
     /// IMAP configuration
     #[serde(default)]
     pub imap: ImapConfig,
+
+    /// POP3 configuration
+    #[serde(default)]
+    pub pop3: Pop3Config,
+
+    /// Web UI configuration
+    #[serde(default)]
+    pub web: WebConfig,
+
+    /// Plugin configuration
+    #[serde(default)]
+    pub plugins: PluginConfig,
 }
 
 /// Server configuration
@@ -420,6 +432,144 @@ fn default_imap_timeout() -> i64 {
 
 fn default_imap_max_connections() -> usize {
     1000
+}
+
+/// POP3 server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pop3Config {
+    /// Enable POP3 server
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// POP3 server bind address
+    #[serde(default = "default_pop3_bind")]
+    pub bind: String,
+
+    /// Enable STARTTLS
+    #[serde(default)]
+    pub starttls: bool,
+
+    /// Session timeout in minutes
+    #[serde(default = "default_pop3_timeout")]
+    pub timeout_minutes: i64,
+
+    /// Maximum concurrent connections
+    #[serde(default = "default_pop3_max_connections")]
+    pub max_connections: usize,
+}
+
+impl Default for Pop3Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_pop3_bind(),
+            starttls: false,
+            timeout_minutes: default_pop3_timeout(),
+            max_connections: default_pop3_max_connections(),
+        }
+    }
+}
+
+fn default_pop3_bind() -> String {
+    "0.0.0.0:110".to_string()
+}
+
+fn default_pop3_timeout() -> i64 {
+    10
+}
+
+fn default_pop3_max_connections() -> usize {
+    500
+}
+
+/// Web UI configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebConfig {
+    /// Enable Web UI
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Web UI server bind address
+    #[serde(default = "default_web_bind")]
+    pub bind: String,
+
+    /// API base URL for frontend
+    #[serde(default = "default_web_api_url")]
+    pub api_url: String,
+
+    /// Enable debug mode
+    #[serde(default)]
+    pub debug: bool,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_web_bind(),
+            api_url: default_web_api_url(),
+            debug: false,
+        }
+    }
+}
+
+fn default_web_bind() -> String {
+    "0.0.0.0:8081".to_string()
+}
+
+fn default_web_api_url() -> String {
+    "/api/v1".to_string()
+}
+
+/// Plugin system configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    /// Enable plugin system
+    #[serde(default = "default_plugins_enabled")]
+    pub enabled: bool,
+
+    /// Plugin directory path
+    #[serde(default = "default_plugin_dir")]
+    pub plugin_dir: Option<String>,
+
+    /// Plugin execution timeout in milliseconds
+    #[serde(default = "default_plugin_timeout")]
+    pub timeout_ms: u64,
+
+    /// Enable built-in categorizer
+    #[serde(default = "default_enable_categorizer")]
+    pub enable_categorizer: bool,
+
+    /// AI service endpoint for categorization
+    pub ai_endpoint: Option<String>,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_plugins_enabled(),
+            plugin_dir: default_plugin_dir(),
+            timeout_ms: default_plugin_timeout(),
+            enable_categorizer: default_enable_categorizer(),
+            ai_endpoint: None,
+        }
+    }
+}
+
+fn default_plugins_enabled() -> bool {
+    true
+}
+
+fn default_plugin_dir() -> Option<String> {
+    Some("/var/lib/mairust/plugins".to_string())
+}
+
+fn default_plugin_timeout() -> u64 {
+    5000
+}
+
+fn default_enable_categorizer() -> bool {
+    true
 }
 
 impl Config {
