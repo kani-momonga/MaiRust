@@ -163,11 +163,11 @@ Full API documentation is available at `/docs` (Swagger UI) or `/openapi.json`.
 - [x] IMAP support (read-only)
 
 ### Phase 3 - Full Mailbox Experience
-- [ ] Full IMAP/POP support (STORE, COPY, MOVE, APPEND, EXPUNGE + POP3)
-- [ ] AI categorization plugins
-- [ ] Message threading and tagging
-- [ ] Web client UI
-- [ ] Plugin system beta
+- [x] Full IMAP/POP support (STORE, COPY, MOVE, APPEND, EXPUNGE + POP3)
+- [x] AI categorization plugins
+- [x] Message threading and tagging
+- [x] Web client UI
+- [x] Plugin system beta
 
 ### Phase 4 - Enterprise & Cloud
 - [ ] Horizontal scaling / cluster mode
