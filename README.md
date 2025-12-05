@@ -13,7 +13,7 @@ MaiRust is an open-source mail server designed for extensibility via webhooks an
 - **SMTP Server** - Inbound (port 25) and Submission (port 587) with STARTTLS
 - **Email Authentication** - SPF validation, DKIM signing/verification, DMARC support
 - **REST API** - Full API for user, domain, mailbox, and message management
-- **Multi-Database Support** - PostgreSQL (recommended) or SQLite
+- **Database Support** - PostgreSQL (recommended)
 - **Flexible Storage** - Local filesystem or S3-compatible object storage
 
 ### Plugin & Hook System
@@ -60,7 +60,7 @@ MaiRust is an open-source mail server designed for extensibility via webhooks an
 ### Prerequisites
 
 - Rust 1.75 or later
-- PostgreSQL 14+ (or SQLite for development)
+- PostgreSQL 14+
 
 ### Installation
 
@@ -147,7 +147,7 @@ Full API documentation is available at `/docs` (Swagger UI) or `/openapi.json`.
 - [x] SMTP AUTH (PLAIN/LOGIN)
 - [x] SPF/DKIM/DMARC support
 - [x] REST API for management
-- [x] PostgreSQL/SQLite storage
+- [x] PostgreSQL storage
 - [x] rspamd integration
 - [x] OpenAPI documentation
 
