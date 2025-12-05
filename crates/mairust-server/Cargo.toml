@@ -1,0 +1,37 @@
+[package]
+name = "mairust-server"
+description = "MaiRust mail server entry point"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mairust"
+path = "src/main.rs"
+
+[dependencies]
+mairust-common = { workspace = true }
+mairust-storage = { workspace = true }
+mairust-core = { workspace = true }
+mairust-api = { workspace = true }
+mairust-web = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# HTTP server
+axum = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# UUID
+uuid = { workspace = true }

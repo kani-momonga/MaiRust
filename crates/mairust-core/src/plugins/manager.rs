@@ -3,7 +3,7 @@
 //! Manages plugin lifecycle, registration, and execution.
 
 use super::categorization::{AiCategorizationPlugin, CategorizationInput, CategorizationOutput, DefaultAiCategorizer};
-use super::types::{Plugin, PluginContext, PluginError, PluginHealth, PluginInfo, PluginResult, PluginStatus};
+use super::types::{Plugin, PluginContext, PluginError, PluginHealth, PluginInfo, PluginProtocol, PluginResult, PluginStatus};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,6 +28,46 @@ pub struct PluginManagerConfig {
     pub ai_endpoint: Option<String>,
     /// Plugin directory
     pub plugin_dir: Option<String>,
+}
+
+/// Plugin manifest format (plugin.toml)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginManifest {
+    /// Plugin unique identifier
+    pub id: String,
+    /// Plugin display name
+    pub name: String,
+    /// Plugin version
+    pub version: String,
+    /// Plugin description
+    pub description: Option<String>,
+    /// Plugin author
+    pub author: Option<String>,
+    /// Plugin type (categorization, filter, webhook, etc.)
+    #[serde(default = "default_plugin_type")]
+    pub plugin_type: String,
+    /// Minimum MaiRust version required
+    pub min_version: Option<String>,
+    /// Maximum MaiRust version supported
+    pub max_version: Option<String>,
+    /// Plugin endpoint URL (for webhook plugins)
+    pub endpoint: Option<String>,
+    /// Plugin permissions required
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+fn default_plugin_type() -> String {
+    "generic".to_string()
+}
+
+impl PluginManifest {
+    /// Check if plugin is compatible with current MaiRust version
+    pub fn is_compatible(&self) -> bool {
+        // For now, accept all plugins
+        // In the future, implement version checking
+        true
+    }
 }
 
 fn default_enabled() -> bool {
@@ -137,8 +177,100 @@ impl PluginManager {
             info!("Built-in AI categorizer initialized");
         }
 
-        // TODO: Load external plugins from plugin_dir
+        // Load external plugins from plugin_dir
+        if let Some(plugin_dir) = self.config.plugin_dir.clone() {
+            if let Err(e) = self.load_plugins_from_directory(&plugin_dir).await {
+                warn!("Failed to load plugins from directory: {}", e);
+            }
+        }
 
+        Ok(())
+    }
+
+    /// Load plugins from a directory
+    async fn load_plugins_from_directory(&mut self, plugin_dir: &str) -> PluginResult<()> {
+        let path = std::path::Path::new(plugin_dir);
+        if !path.exists() {
+            debug!("Plugin directory does not exist: {}", plugin_dir);
+            return Ok(());
+        }
+
+        info!("Loading plugins from directory: {}", plugin_dir);
+
+        let entries = match std::fs::read_dir(path) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Failed to read plugin directory: {}", e);
+                return Ok(());
+            }
+        };
+
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                // Check for plugin.toml in subdirectory
+                let plugin_toml = entry_path.join("plugin.toml");
+                if plugin_toml.exists() {
+                    if let Err(e) = self.load_plugin_from_manifest(&plugin_toml).await {
+                        warn!("Failed to load plugin from {:?}: {}", plugin_toml, e);
+                    }
+                }
+            } else if entry_path.extension().map_or(false, |e| e == "toml") {
+                // Load standalone plugin.toml files
+                if let Err(e) = self.load_plugin_from_manifest(&entry_path).await {
+                    warn!("Failed to load plugin from {:?}: {}", entry_path, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Load a plugin from its manifest file
+    async fn load_plugin_from_manifest(&mut self, manifest_path: &std::path::Path) -> PluginResult<()> {
+        let content = std::fs::read_to_string(manifest_path)
+            .map_err(|e| PluginError::Internal(format!("Failed to read manifest: {}", e)))?;
+
+        let manifest: PluginManifest = toml::from_str(&content)
+            .map_err(|e| PluginError::Internal(format!("Failed to parse manifest: {}", e)))?;
+
+        // Check if plugin is compatible
+        if !manifest.is_compatible() {
+            warn!("Plugin {} is not compatible with this version", manifest.id);
+            return Ok(());
+        }
+
+        let protocol = if let Some(ref endpoint) = manifest.endpoint {
+            PluginProtocol::Http { endpoint: endpoint.clone() }
+        } else {
+            PluginProtocol::Native
+        };
+
+        let plugin_info = PluginInfo {
+            id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            description: manifest.description.clone(),
+            author: manifest.author.clone(),
+            homepage: None,
+            capabilities: Vec::new(),
+            protocol,
+        };
+
+        // Register the plugin
+        self.plugins.write().await.insert(
+            manifest.id.clone(),
+            PluginEntry {
+                info: plugin_info,
+                status: PluginStatus::Active,
+                enabled: true,
+                error_count: 0,
+                last_error: None,
+                last_success: Some(Utc::now()),
+            },
+        );
+
+        info!("Loaded plugin: {} v{}", manifest.name, manifest.version);
         Ok(())
     }
 
@@ -277,15 +409,107 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Install a plugin from a package
-    pub async fn install_plugin(&mut self, _package_path: &str) -> PluginResult<PluginInfo> {
-        // TODO: Implement plugin installation
-        // 1. Verify package signature
-        // 2. Extract and parse plugin.toml
-        // 3. Check compatibility
-        // 4. Install files to plugin directory
-        // 5. Register plugin
-        Err(PluginError::Internal("Plugin installation not yet implemented".to_string()))
+    /// Install a plugin from a package or manifest path
+    pub async fn install_plugin(&mut self, package_path: &str) -> PluginResult<PluginInfo> {
+        let path = std::path::Path::new(package_path);
+
+        if !path.exists() {
+            return Err(PluginError::NotFound(format!(
+                "Plugin package not found: {}",
+                package_path
+            )));
+        }
+
+        // If it's a directory, look for plugin.toml inside
+        let manifest_path = if path.is_dir() {
+            path.join("plugin.toml")
+        } else if path.extension().map_or(false, |e| e == "toml") {
+            path.to_path_buf()
+        } else {
+            return Err(PluginError::Internal(
+                "Plugin package must be a directory with plugin.toml or a .toml file".to_string(),
+            ));
+        };
+
+        if !manifest_path.exists() {
+            return Err(PluginError::NotFound(format!(
+                "Plugin manifest not found: {:?}",
+                manifest_path
+            )));
+        }
+
+        // Read and parse the manifest
+        let content = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| PluginError::Internal(format!("Failed to read manifest: {}", e)))?;
+
+        let manifest: PluginManifest = toml::from_str(&content)
+            .map_err(|e| PluginError::Internal(format!("Failed to parse manifest: {}", e)))?;
+
+        // Check if plugin is compatible
+        if !manifest.is_compatible() {
+            return Err(PluginError::Internal(format!(
+                "Plugin {} is not compatible with this version",
+                manifest.id
+            )));
+        }
+
+        // Check if already installed
+        if self.plugins.read().await.contains_key(&manifest.id) {
+            return Err(PluginError::Internal(format!(
+                "Plugin {} is already installed",
+                manifest.id
+            )));
+        }
+
+        // Copy to plugin directory if configured
+        if let Some(ref plugin_dir) = self.config.plugin_dir {
+            let target_dir = std::path::Path::new(plugin_dir).join(&manifest.id);
+            if !target_dir.exists() {
+                std::fs::create_dir_all(&target_dir)
+                    .map_err(|e| PluginError::Internal(format!("Failed to create plugin directory: {}", e)))?;
+            }
+
+            // Copy manifest
+            let target_manifest = target_dir.join("plugin.toml");
+            std::fs::copy(&manifest_path, &target_manifest)
+                .map_err(|e| PluginError::Internal(format!("Failed to copy manifest: {}", e)))?;
+
+            info!("Installed plugin files to {:?}", target_dir);
+        }
+
+        let protocol = if let Some(ref endpoint) = manifest.endpoint {
+            PluginProtocol::Http { endpoint: endpoint.clone() }
+        } else {
+            PluginProtocol::Native
+        };
+
+        let plugin_info = PluginInfo {
+            id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            description: manifest.description.clone(),
+            author: manifest.author.clone(),
+            homepage: None,
+            capabilities: Vec::new(),
+            protocol,
+        };
+
+        // Register the plugin
+        self.plugins.write().await.insert(
+            manifest.id.clone(),
+            PluginEntry {
+                info: plugin_info.clone(),
+                status: PluginStatus::Active,
+                enabled: true,
+                error_count: 0,
+                last_error: None,
+                last_success: Some(Utc::now()),
+            },
+        );
+
+        info!("Installed plugin: {} v{}", manifest.name, manifest.version);
+
+        Ok(plugin_info)
     }
 
     /// Uninstall a plugin

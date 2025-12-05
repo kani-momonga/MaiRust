@@ -1,14 +1,17 @@
-//! IMAP4 Server Module (Read-Only)
+//! IMAP4 Server Module
 //!
-//! Implements a read-only IMAP4 server for mail access.
-//! This implementation supports reading mail but not modifying it.
+//! Implements a full-featured IMAP4rev1 server for mail access.
+//! This implementation supports both reading and writing operations.
 //!
 //! Supported commands:
 //! - CAPABILITY, NOOP, LOGOUT
 //! - LOGIN, AUTHENTICATE (PLAIN)
-//! - LIST, LSUB, SELECT, EXAMINE
+//! - LIST, LSUB, SELECT, EXAMINE, STATUS
 //! - FETCH, SEARCH
 //! - CLOSE, CHECK
+//! - CREATE, DELETE, RENAME, SUBSCRIBE, UNSUBSCRIBE (mailbox management)
+//! - STORE, COPY, MOVE, EXPUNGE, APPEND (message operations)
+//! - IDLE, NAMESPACE (extensions)
 
 pub mod command;
 pub mod parser;

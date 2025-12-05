@@ -11,6 +11,7 @@ mairust-storage = { workspace = true }
 
 # Web framework
 axum = { workspace = true }
+axum-extra = { workspace = true, features = ["cookie"] }
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["fs", "cors", "compression-gzip"] }
 
@@ -31,6 +32,13 @@ tracing = { workspace = true }
 # UUID & Time
 uuid = { workspace = true }
 chrono = { workspace = true }
+time = { workspace = true }
+
+# Authentication
+argon2 = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
 
 # Template engine
 minijinja = { workspace = true }
