@@ -746,8 +746,11 @@ impl ImapServer {
                         if let Some(ref storage) = storage {
                             match storage.read(&msg.storage_path).await {
                                 Ok(data) => {
+                                    // Convert to UTF-8 (lossy) and use the converted string's
+                                    // byte length for the literal size to ensure consistency.
+                                    // This avoids mismatch when non-UTF-8 bytes are replaced.
                                     let body = String::from_utf8_lossy(&data);
-                                    fetch_items.push((body_key, format!("{{{}}}\r\n{}", data.len(), body)));
+                                    fetch_items.push((body_key, format!("{{{}}}\r\n{}", body.len(), body)));
                                 }
                                 Err(e) => {
                                     // Fall back to body_preview if storage read fails
