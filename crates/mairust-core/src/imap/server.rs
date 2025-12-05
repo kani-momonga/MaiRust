@@ -353,10 +353,12 @@ impl ImapServer {
             .bind(tenant_id)
             .bind(user_id)
         } else {
+            // SECURITY: Must filter by user_id to prevent cross-user mailbox access
             sqlx::query_as::<_, (Uuid, String)>(
-                "SELECT id, address FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+                "SELECT id, address FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 AND address = $3",
             )
             .bind(tenant_id)
+            .bind(user_id)
             .bind(mailbox_name)
         };
 
@@ -479,15 +481,22 @@ impl ImapServer {
             Some(id) => id,
             None => return ImapResponse::no(tag, "No tenant context"),
         };
+
+        let user_id = match sess.user_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No user context"),
+        };
         drop(sess);
 
         let pool = db_pool.pool();
 
         // Get mailbox
+        // SECURITY: Must filter by user_id to prevent cross-user mailbox access
         let mailbox: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+            "SELECT id FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 AND address = $3",
         )
         .bind(tenant_id)
+        .bind(user_id)
         .bind(mailbox_name)
         .fetch_optional(pool)
         .await
