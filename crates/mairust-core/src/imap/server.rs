@@ -11,8 +11,10 @@ use anyhow::Result;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use mairust_storage::db::DatabasePool;
 use mairust_storage::models::Message;
+use mairust_storage::{FileStorage, LocalStorage};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -35,6 +37,13 @@ pub struct ImapConfig {
     /// Maximum connections
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Storage path for message files
+    #[serde(default = "default_storage_path")]
+    pub storage_path: PathBuf,
+}
+
+fn default_storage_path() -> PathBuf {
+    PathBuf::from("/var/lib/mairust/mail")
 }
 
 fn default_bind() -> String {
@@ -56,6 +65,7 @@ impl Default for ImapConfig {
             starttls: false,
             timeout_minutes: default_timeout(),
             max_connections: default_max_connections(),
+            storage_path: default_storage_path(),
         }
     }
 }
@@ -142,7 +152,7 @@ impl ImapServer {
                     // Parse command
                     let response = match ImapParser::parse(&line) {
                         Some(cmd) => {
-                            Self::handle_command(cmd, &session, &db_pool).await
+                            Self::handle_command(cmd, &session, &db_pool, &config.storage_path).await
                         }
                         None => {
                             "* BAD Invalid command\r\n".to_string()
@@ -188,6 +198,7 @@ impl ImapServer {
         cmd: TaggedCommand,
         session: &Arc<Mutex<ImapSession>>,
         db_pool: &DatabasePool,
+        storage_path: &PathBuf,
     ) -> String {
         let tag = &cmd.tag;
 
@@ -259,7 +270,7 @@ impl ImapServer {
                 }
             }
             ImapCommand::Fetch { sequence, items, uid } => {
-                Self::handle_fetch(tag, &sequence, &items, uid, session, db_pool).await
+                Self::handle_fetch(tag, &sequence, &items, uid, session, db_pool, storage_path).await
             }
             ImapCommand::Search { criteria, uid } => {
                 Self::handle_search(tag, &criteria, uid, session, db_pool).await
@@ -296,7 +307,7 @@ impl ImapServer {
                 Self::handle_expunge(tag, session, db_pool).await
             }
             ImapCommand::Append { mailbox, flags, date, message } => {
-                Self::handle_append(tag, &mailbox, &flags, date.as_deref(), &message, session, db_pool).await
+                Self::handle_append(tag, &mailbox, &flags, date.as_deref(), &message, session, db_pool, storage_path).await
             }
 
             // Extensions
@@ -603,6 +614,7 @@ impl ImapServer {
         uid_mode: bool,
         session: &Arc<Mutex<ImapSession>>,
         db_pool: &DatabasePool,
+        storage_path: &PathBuf,
     ) -> String {
         let sess = session.lock().await;
         if !sess.is_selected() {
@@ -625,6 +637,15 @@ impl ImapServer {
         .fetch_all(pool)
         .await
         .unwrap_or_default();
+
+        // Initialize storage for reading full message bodies
+        let storage = match LocalStorage::from_path(storage_path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!("Failed to initialize storage for FETCH: {}", e);
+                None
+            }
+        };
 
         let mut response = String::new();
         let max_seq = messages.len() as u32;
@@ -720,9 +741,24 @@ impl ImapServer {
                             ImapResponse::format_body_structure_simple(msg.body_size as u64, lines)));
                     }
                     FetchItem::BodySection { section, .. } | FetchItem::BodyPeek { section, .. } => {
-                        // Return body preview for now (full body would require storage access)
-                        if let Some(preview) = &msg.body_preview {
-                            let body_key = format!("BODY[{}]", section);
+                        // Read full message body from storage
+                        let body_key = format!("BODY[{}]", section);
+                        if let Some(ref storage) = storage {
+                            match storage.read(&msg.storage_path).await {
+                                Ok(data) => {
+                                    let body = String::from_utf8_lossy(&data);
+                                    fetch_items.push((body_key, format!("{{{}}}\r\n{}", data.len(), body)));
+                                }
+                                Err(e) => {
+                                    // Fall back to body_preview if storage read fails
+                                    warn!("Failed to read message from storage: {}", e);
+                                    if let Some(preview) = &msg.body_preview {
+                                        fetch_items.push((body_key, format!("{{{}}}\r\n{}", preview.len(), preview)));
+                                    }
+                                }
+                            }
+                        } else if let Some(preview) = &msg.body_preview {
+                            // No storage available, use preview
                             fetch_items.push((body_key, format!("{{{}}}\r\n{}", preview.len(), preview)));
                         }
                     }
@@ -1562,6 +1598,7 @@ impl ImapServer {
         message: &[u8],
         session: &Arc<Mutex<ImapSession>>,
         db_pool: &DatabasePool,
+        storage_path_base: &PathBuf,
     ) -> String {
         let sess = session.lock().await;
         if !sess.is_authenticated() {
@@ -1607,11 +1644,25 @@ impl ImapServer {
         let draft = flags.iter().any(|f| f.to_uppercase() == "\\DRAFT");
 
         // Create the message
-        // Note: In a real implementation, we would parse the message content
-        // For now, we create a placeholder entry
         let message_id = Uuid::new_v4();
+        // Create preview from first 500 characters of message for quick display
         let body_preview = String::from_utf8_lossy(message).chars().take(500).collect::<String>();
         let storage_path = format!("{}/{}/{}.eml", tenant_id, mailbox_id, message_id);
+
+        // Initialize file storage and store the FULL message
+        let storage = match LocalStorage::from_path(storage_path_base) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to initialize storage for APPEND: {}", e);
+                return ImapResponse::no(tag, "Failed to initialize storage");
+            }
+        };
+
+        // Write the full message to file storage
+        if let Err(e) = storage.store(&storage_path, message).await {
+            error!("Failed to store message to file: {}", e);
+            return ImapResponse::no(tag, "Failed to store message");
+        }
 
         let insert_result = sqlx::query(
             "INSERT INTO messages (id, tenant_id, mailbox_id, body_preview, body_size, storage_path,
