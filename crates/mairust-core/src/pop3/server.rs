@@ -10,8 +10,10 @@ use anyhow::Result;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use mairust_storage::db::DatabasePool;
 use mairust_storage::models::Message;
+use mairust_storage::{FileStorage, LocalStorage};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -37,6 +39,13 @@ pub struct Pop3Config {
     /// Server name for greeting
     #[serde(default = "default_server_name")]
     pub server_name: String,
+    /// Storage path for message files
+    #[serde(default = "default_storage_path")]
+    pub storage_path: PathBuf,
+}
+
+fn default_storage_path() -> PathBuf {
+    PathBuf::from("/var/lib/mairust/mail")
 }
 
 fn default_bind() -> String {
@@ -63,6 +72,7 @@ impl Default for Pop3Config {
             timeout_minutes: default_timeout(),
             max_connections: default_max_connections(),
             server_name: default_server_name(),
+            storage_path: default_storage_path(),
         }
     }
 }
@@ -150,7 +160,7 @@ impl Pop3Server {
                     // Parse and handle command
                     let cmd = Pop3Parser::parse(&line);
                     let (response, should_quit) =
-                        Self::handle_command(cmd, &session, &db_pool).await;
+                        Self::handle_command(cmd, &session, &db_pool, &config.storage_path).await;
 
                     // Send response
                     {
@@ -187,6 +197,7 @@ impl Pop3Server {
         cmd: Pop3Command,
         session: &Arc<Mutex<Pop3Session>>,
         db_pool: &DatabasePool,
+        storage_path: &PathBuf,
     ) -> (String, bool) {
         match cmd {
             // Authorization state commands
@@ -222,7 +233,7 @@ impl Pop3Server {
 
             Pop3Command::List { msg } => Self::handle_list(msg, session).await,
 
-            Pop3Command::Retr { msg } => Self::handle_retr(msg, session, db_pool).await,
+            Pop3Command::Retr { msg } => Self::handle_retr(msg, session, storage_path).await,
 
             Pop3Command::Dele { msg } => {
                 let mut sess = session.lock().await;
@@ -259,7 +270,7 @@ impl Pop3Server {
                 )
             }
 
-            Pop3Command::Top { msg, lines } => Self::handle_top(msg, lines, session, db_pool).await,
+            Pop3Command::Top { msg, lines } => Self::handle_top(msg, lines, session, storage_path).await,
 
             Pop3Command::Uidl { msg } => Self::handle_uidl(msg, session).await,
 
@@ -413,7 +424,7 @@ impl Pop3Server {
     async fn handle_retr(
         msg: u32,
         session: &Arc<Mutex<Pop3Session>>,
-        db_pool: &DatabasePool,
+        storage_path: &PathBuf,
     ) -> (String, bool) {
         let sess = session.lock().await;
 
@@ -428,20 +439,37 @@ impl Pop3Server {
 
         drop(sess);
 
-        // In a real implementation, we would read the full message from storage
-        // For now, we return the body preview with basic headers
-        let body = message_info.body_preview.unwrap_or_default();
-        let size = body.len() as u64;
+        // Initialize file storage and read the full message
+        let storage = match LocalStorage::from_path(storage_path) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to initialize storage for RETR: {}", e);
+                return (Pop3Response::err("Failed to read message"), false);
+            }
+        };
 
-        let mut response = Pop3Response::retr_header(size);
+        // Read full message from storage
+        let message_data = match storage.read(&message_info.storage_path).await {
+            Ok(data) => data,
+            Err(e) => {
+                // Fall back to body_preview if storage read fails
+                warn!("Failed to read message from storage: {}, falling back to preview", e);
+                let body = message_info.body_preview.unwrap_or_default();
+                let mut response = Pop3Response::retr_header(body.len() as u64);
+                for line in body.lines() {
+                    response.push_str(&Pop3Response::byte_stuff_line(line));
+                    response.push_str("\r\n");
+                }
+                response.push_str(&Pop3Response::terminator());
+                return (response, false);
+            }
+        };
 
-        // Add basic headers (placeholder - real impl would parse stored message)
-        response.push_str("From: sender@example.com\r\n");
-        response.push_str("To: recipient@example.com\r\n");
-        response.push_str("Subject: Message\r\n");
-        response.push_str("\r\n");
+        // Return the full message with correct size
+        let body = String::from_utf8_lossy(&message_data);
+        let mut response = Pop3Response::retr_header(message_data.len() as u64);
 
-        // Add body with byte-stuffing
+        // Add body with byte-stuffing for POP3 protocol compliance
         for line in body.lines() {
             response.push_str(&Pop3Response::byte_stuff_line(line));
             response.push_str("\r\n");
@@ -456,7 +484,7 @@ impl Pop3Server {
         msg: u32,
         lines: u32,
         session: &Arc<Mutex<Pop3Session>>,
-        _db_pool: &DatabasePool,
+        storage_path: &PathBuf,
     ) -> (String, bool) {
         let sess = session.lock().await;
 
@@ -471,22 +499,48 @@ impl Pop3Server {
 
         drop(sess);
 
+        // Initialize file storage and read the full message
+        let storage = match LocalStorage::from_path(storage_path) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to initialize storage for TOP: {}", e);
+                return (Pop3Response::err("Failed to read message"), false);
+            }
+        };
+
+        // Read full message from storage
+        let message_data = match storage.read(&message_info.storage_path).await {
+            Ok(data) => String::from_utf8_lossy(&data).to_string(),
+            Err(e) => {
+                // Fall back to body_preview if storage read fails
+                warn!("Failed to read message from storage for TOP: {}", e);
+                message_info.body_preview.unwrap_or_default()
+            }
+        };
+
         let mut response = Pop3Response::top_header();
 
-        // Add basic headers
-        response.push_str("From: sender@example.com\r\n");
-        response.push_str("To: recipient@example.com\r\n");
-        response.push_str("Subject: Message\r\n");
-        response.push_str("\r\n");
+        // Split message into headers and body
+        let mut in_body = false;
+        let mut body_lines_count = 0;
 
-        // Add first n lines of body
-        if let Some(body) = &message_info.body_preview {
-            for (idx, line) in body.lines().enumerate() {
-                if idx >= lines as usize {
+        for line in message_data.lines() {
+            if !in_body {
+                // Output headers
+                response.push_str(&Pop3Response::byte_stuff_line(line));
+                response.push_str("\r\n");
+                // Empty line indicates end of headers
+                if line.is_empty() {
+                    in_body = true;
+                }
+            } else {
+                // Output body lines up to the requested limit
+                if body_lines_count >= lines as usize {
                     break;
                 }
                 response.push_str(&Pop3Response::byte_stuff_line(line));
                 response.push_str("\r\n");
+                body_lines_count += 1;
             }
         }
 
