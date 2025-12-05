@@ -152,11 +152,11 @@ Full API documentation is available at `/docs` (Swagger UI) or `/openapi.json`.
 - [x] OpenAPI documentation
 
 ### Phase 2 - Core Platform Expansion
-- [ ] Multi-domain support enhancements
-- [ ] Full-text search (Meilisearch integration)
-- [ ] Admin Dashboard
-- [ ] Advanced policy system
-- [ ] IMAP support (read-only)
+- [x] Multi-domain support enhancements
+- [x] Full-text search (Meilisearch integration)
+- [x] Admin Dashboard
+- [x] Advanced policy system
+- [x] IMAP support (read-only)
 
 ### Phase 3 - Full Mailbox Experience
 - [ ] Full IMAP/POP support
