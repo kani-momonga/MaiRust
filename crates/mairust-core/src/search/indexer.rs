@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::client::{MeilisearchClient, SearchRequest, SearchResult};
@@ -157,7 +157,17 @@ impl MessageIndexer {
 
     /// Check if search service is available
     pub async fn is_available(&self) -> bool {
-        self.client.health_check().await.unwrap_or(false)
+        match self.client.health_check().await {
+            Ok(true) => true,
+            Ok(false) => {
+                warn!("Search service reported unhealthy status");
+                false
+            }
+            Err(e) => {
+                error!("Search health check failed: {}", e);
+                false
+            }
+        }
     }
 
     /// Index a single message
@@ -201,7 +211,10 @@ impl MessageIndexer {
     }
 
     /// Search for messages
-    pub async fn search(&self, options: SearchOptions) -> Result<SearchResult<MessageSearchHit>, String> {
+    pub async fn search(
+        &self,
+        options: SearchOptions,
+    ) -> Result<SearchResult<MessageSearchHit>, String> {
         // Build filter string
         let mut filters = vec![format!("tenant_id = '{}'", options.tenant_id)];
 
@@ -227,10 +240,8 @@ impl MessageIndexer {
 
         if let Some(tags) = options.tags {
             if !tags.is_empty() {
-                let tag_conditions: Vec<String> = tags
-                    .iter()
-                    .map(|t| format!("tags = '{}'", t))
-                    .collect();
+                let tag_conditions: Vec<String> =
+                    tags.iter().map(|t| format!("tags = '{}'", t)).collect();
                 filters.push(format!("({})", tag_conditions.join(" OR ")));
             }
         }

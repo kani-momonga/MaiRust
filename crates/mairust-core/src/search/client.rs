@@ -120,10 +120,7 @@ impl Default for IndexSettings {
                 "received_at".to_string(),
                 "tags".to_string(),
             ],
-            sortable_attributes: vec![
-                "received_at".to_string(),
-                "subject".to_string(),
-            ],
+            sortable_attributes: vec!["received_at".to_string(), "subject".to_string()],
             displayed_attributes: vec!["*".to_string()],
         }
     }
@@ -172,9 +169,22 @@ impl MeilisearchClient {
             .build_request(reqwest::Method::GET, "/health")
             .send()
             .await
-            .map_err(|e| format!("Health check failed: {}", e))?;
+            .map_err(|e| format!("Health check request failed: {}", e))?;
 
-        Ok(response.status().is_success())
+        let status = response.status();
+        if status.is_success() {
+            Ok(true)
+        } else {
+            let body = response.text().await.unwrap_or_else(|e| {
+                warn!("Failed to read Meilisearch health response body: {}", e);
+                String::new()
+            });
+            warn!(
+                "Meilisearch health check failed: status={} body={}",
+                status, body
+            );
+            Ok(false)
+        }
     }
 
     /// Create or update the messages index with proper settings
@@ -227,7 +237,10 @@ impl MeilisearchClient {
     }
 
     /// Add or update documents in the index
-    pub async fn index_documents<T: Serialize>(&self, documents: &[T]) -> Result<TaskResponse, String> {
+    pub async fn index_documents<T: Serialize>(
+        &self,
+        documents: &[T],
+    ) -> Result<TaskResponse, String> {
         if documents.is_empty() {
             return Err("No documents to index".to_string());
         }
@@ -400,8 +413,14 @@ mod tests {
     #[test]
     fn test_index_settings_default() {
         let settings = IndexSettings::default();
-        assert!(settings.searchable_attributes.contains(&"subject".to_string()));
-        assert!(settings.filterable_attributes.contains(&"tenant_id".to_string()));
-        assert!(settings.sortable_attributes.contains(&"received_at".to_string()));
+        assert!(settings
+            .searchable_attributes
+            .contains(&"subject".to_string()));
+        assert!(settings
+            .filterable_attributes
+            .contains(&"tenant_id".to_string()));
+        assert!(settings
+            .sortable_attributes
+            .contains(&"received_at".to_string()));
     }
 }
