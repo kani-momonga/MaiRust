@@ -455,26 +455,33 @@ impl Pop3Server {
                 // Fall back to body_preview if storage read fails
                 warn!("Failed to read message from storage: {}, falling back to preview", e);
                 let body = message_info.body_preview.unwrap_or_default();
-                let mut response = Pop3Response::retr_header(body.len() as u64);
+                // Build body content first to calculate accurate size
+                let mut body_content = String::new();
                 for line in body.lines() {
-                    response.push_str(&Pop3Response::byte_stuff_line(line));
-                    response.push_str("\r\n");
+                    body_content.push_str(&Pop3Response::byte_stuff_line(line));
+                    body_content.push_str("\r\n");
                 }
+                let mut response = Pop3Response::retr_header(body_content.len() as u64);
+                response.push_str(&body_content);
                 response.push_str(&Pop3Response::terminator());
                 return (response, false);
             }
         };
 
-        // Return the full message with correct size
+        // Convert to UTF-8 and build body content first to get accurate size
+        // This ensures the octet count matches the actual payload sent
         let body = String::from_utf8_lossy(&message_data);
-        let mut response = Pop3Response::retr_header(message_data.len() as u64);
+        let mut body_content = String::new();
 
         // Add body with byte-stuffing for POP3 protocol compliance
         for line in body.lines() {
-            response.push_str(&Pop3Response::byte_stuff_line(line));
-            response.push_str("\r\n");
+            body_content.push_str(&Pop3Response::byte_stuff_line(line));
+            body_content.push_str("\r\n");
         }
 
+        // Now build response with accurate size
+        let mut response = Pop3Response::retr_header(body_content.len() as u64);
+        response.push_str(&body_content);
         response.push_str(&Pop3Response::terminator());
         (response, false)
     }
