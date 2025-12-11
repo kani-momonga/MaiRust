@@ -13,6 +13,11 @@ pub mod policies;
 pub mod threads;
 pub mod tags;
 pub mod categories;
+pub mod campaigns;
+pub mod recipient_lists;
+pub mod recipients;
+pub mod scheduled_messages;
+pub mod unsubscribes;
 
 // Re-export concrete repository implementations with simple names
 pub use api_keys::DbApiKeyRepository as ApiKeyRepository;
@@ -28,6 +33,11 @@ pub use policies::DbPolicyRepository as PolicyRepository;
 pub use threads::ThreadRepository;
 pub use tags::TagRepository;
 pub use categories::CategoryRepository;
+pub use campaigns::CampaignRepository;
+pub use recipient_lists::RecipientListRepository;
+pub use recipients::RecipientRepository;
+pub use scheduled_messages::ScheduledMessageRepository;
+pub use unsubscribes::UnsubscribeRepository;
 
 // Re-export repository traits
 pub use api_keys::ApiKeyRepository as ApiKeyRepositoryTrait;
@@ -40,3 +50,6 @@ pub use policies::PolicyRepository as PolicyRepositoryTrait;
 
 // Re-export API key types
 pub use api_keys::{ApiKey, ApiKeyId};
+
+// Re-export scheduled message types
+pub use scheduled_messages::CampaignMessageCounts;

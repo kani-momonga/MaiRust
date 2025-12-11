@@ -11,8 +11,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::{auth_middleware, AppState};
 use crate::handlers::{
-    admin, domain_aliases, domain_settings, domains, health, hooks, mailboxes, messages, policies,
-    search, send, tenants, users,
+    admin, campaigns, domain_aliases, domain_settings, domains, health, hooks, mailboxes, messages,
+    policies, recipient_lists, search, send, tenants, users,
 };
 use crate::openapi::create_openapi_routes;
 
@@ -113,6 +113,34 @@ pub fn create_router(db_pool: DatabasePool) -> Router {
         .route("/status", get(search::search_status))
         .route("/reindex", post(search::reindex_messages));
 
+    // Campaign routes
+    let campaign_routes = Router::new()
+        .route("/", get(campaigns::list_campaigns))
+        .route("/", post(campaigns::create_campaign))
+        .route("/:campaign_id", get(campaigns::get_campaign))
+        .route("/:campaign_id", put(campaigns::update_campaign))
+        .route("/:campaign_id", delete(campaigns::delete_campaign))
+        .route("/:campaign_id/schedule", post(campaigns::schedule_campaign))
+        .route("/:campaign_id/send", post(campaigns::send_campaign))
+        .route("/:campaign_id/pause", post(campaigns::pause_campaign))
+        .route("/:campaign_id/resume", post(campaigns::resume_campaign))
+        .route("/:campaign_id/cancel", post(campaigns::cancel_campaign))
+        .route("/:campaign_id/stats", get(campaigns::get_campaign_stats));
+
+    // Recipient list routes
+    let recipient_list_routes = Router::new()
+        .route("/", get(recipient_lists::list_recipient_lists))
+        .route("/", post(recipient_lists::create_recipient_list))
+        .route("/:list_id", get(recipient_lists::get_recipient_list))
+        .route("/:list_id", put(recipient_lists::update_recipient_list))
+        .route("/:list_id", delete(recipient_lists::delete_recipient_list))
+        .route("/:list_id/recipients", get(recipient_lists::list_recipients))
+        .route("/:list_id/recipients", post(recipient_lists::add_recipient))
+        .route("/:list_id/recipients/import", post(recipient_lists::import_recipients))
+        .route("/:list_id/recipients/:recipient_id", get(recipient_lists::get_recipient))
+        .route("/:list_id/recipients/:recipient_id", put(recipient_lists::update_recipient))
+        .route("/:list_id/recipients/:recipient_id", delete(recipient_lists::delete_recipient));
+
     // Admin dashboard routes (super admin)
     let admin_system_routes = Router::new()
         .route("/stats", get(admin::get_system_stats))
@@ -138,6 +166,8 @@ pub fn create_router(db_pool: DatabasePool) -> Router {
         .nest("/tenants/:tenant_id/policies", policy_routes)
         .nest("/tenants/:tenant_id/search", search_routes)
         .nest("/tenants/:tenant_id/send", send_routes)
+        .nest("/tenants/:tenant_id/campaigns", campaign_routes)
+        .nest("/tenants/:tenant_id/recipient-lists", recipient_list_routes)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

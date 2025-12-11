@@ -18,6 +18,10 @@ tokio-rustls = { workspace = true }
 mailin-embedded = { workspace = true }
 mail-parser = { workspace = true }
 mail-builder = { workspace = true }
+lettre = { workspace = true }
+
+# Hex encoding
+hex = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

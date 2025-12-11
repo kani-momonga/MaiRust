@@ -10,6 +10,7 @@ pub mod plugins;
 pub mod policy;
 pub mod pop3;
 pub mod queue;
+pub mod scheduled;
 pub mod search;
 pub mod smtp;
 pub mod spam;
@@ -21,6 +22,7 @@ pub use plugins::{PluginManager, PluginManagerConfig, AiCategorizationPlugin, Ca
 pub use policy::{PolicyContext, PolicyEngine, PolicyEvaluation, PolicyEvaluationResult, PolicyMatch};
 pub use pop3::{Pop3Config, Pop3Server};
 pub use queue::QueueManager;
+pub use scheduled::{CampaignManager, CampaignError, ScheduledDeliveryWorker, DeliveryResult, RateLimiter, RemainingQuota, TemplateRenderer, SmtpConfig};
 pub use search::{MeilisearchClient, MeilisearchConfig, MessageDocument, MessageIndexer, MessageSearchHit, SearchOptions, SearchResult};
 pub use smtp::SmtpServer;
 pub use spam::{RspamdClient, RspamdConfig, SpamAction, SpamCheckResult, SpamFilter};
