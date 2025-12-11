@@ -31,6 +31,18 @@ pub type DomainAliasId = Uuid;
 /// Unique identifier for policies
 pub type PolicyId = Uuid;
 
+/// Unique identifier for campaigns
+pub type CampaignId = Uuid;
+
+/// Unique identifier for recipient lists
+pub type RecipientListId = Uuid;
+
+/// Unique identifier for recipients
+pub type RecipientId = Uuid;
+
+/// Unique identifier for scheduled messages
+pub type ScheduledMessageId = Uuid;
+
 /// Email address
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EmailAddress {
