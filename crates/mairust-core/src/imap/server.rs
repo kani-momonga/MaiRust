@@ -2,13 +2,16 @@
 //!
 //! Full-featured IMAP server implementation with read/write mail access.
 
-use super::command::{FetchItem, ImapCommand, SearchCriteria, SequenceSet, StoreFlags, StoreOperation, TaggedCommand};
+use super::command::{
+    FetchItem, ImapCommand, SearchCriteria, SequenceSet, StoreFlags, StoreOperation, TaggedCommand,
+};
 use super::parser::ImapParser;
 use super::response::ImapResponse;
 use super::session::{ImapSession, SelectedMailbox, SessionState};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use mairust_common::config::TlsConfig;
 use mairust_storage::db::DatabasePool;
 use mairust_storage::models::Message;
 use mairust_storage::{FileStorage, LocalStorage};
@@ -19,6 +22,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -74,27 +78,62 @@ impl Default for ImapConfig {
 pub struct ImapServer {
     config: ImapConfig,
     db_pool: DatabasePool,
+    tls_acceptor: Option<Arc<TlsAcceptor>>,
 }
 
 impl ImapServer {
     /// Create a new IMAP server
     pub fn new(config: ImapConfig, db_pool: DatabasePool) -> Self {
-        Self { config, db_pool }
+        Self {
+            config,
+            db_pool,
+            tls_acceptor: None,
+        }
+    }
+
+    pub fn with_tls(config: ImapConfig, db_pool: DatabasePool, tls: Option<&TlsConfig>) -> Self {
+        let tls_acceptor =
+            tls.and_then(
+                |tls_config| match crate::smtp::create_tls_acceptor(tls_config) {
+                    Ok(acceptor) => Some(Arc::new(acceptor)),
+                    Err(e) => {
+                        warn!("Failed to initialize IMAP STARTTLS acceptor: {}", e);
+                        None
+                    }
+                },
+            );
+
+        Self {
+            config,
+            db_pool,
+            tls_acceptor,
+        }
     }
 
     /// Start the IMAP server
     pub async fn run(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.config.bind).await?;
-        info!("IMAP server listening on {}", self.config.bind);
+        let tls_status = if self.config.starttls && self.tls_acceptor.is_some() {
+            "STARTTLS enabled"
+        } else {
+            "STARTTLS disabled"
+        };
+        info!(
+            "IMAP server listening on {} ({})",
+            self.config.bind, tls_status
+        );
 
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     let db_pool = self.db_pool.clone();
                     let config = self.config.clone();
+                    let tls_acceptor = self.tls_acceptor.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(stream, addr, db_pool, config).await
+                        if let Err(e) =
+                            Self::handle_connection(stream, addr, db_pool, config, tls_acceptor)
+                                .await
                         {
                             error!("Connection error from {}: {}", addr, e);
                         }
@@ -113,6 +152,7 @@ impl ImapServer {
         addr: SocketAddr,
         db_pool: DatabasePool,
         config: ImapConfig,
+        tls_acceptor: Option<Arc<TlsAcceptor>>,
     ) -> Result<()> {
         info!("New IMAP connection from {}", addr);
 
@@ -124,7 +164,9 @@ impl ImapServer {
         // Send greeting
         {
             let mut w = writer.lock().await;
-            w.write_all(ImapResponse::greeting().as_bytes()).await?;
+            let advertise_starttls = config.starttls && tls_acceptor.is_some();
+            w.write_all(ImapResponse::greeting_with_starttls(advertise_starttls).as_bytes())
+                .await?;
             w.flush().await?;
         }
 
@@ -150,13 +192,47 @@ impl ImapServer {
                     debug!("Received from {}: {}", addr, line.trim());
 
                     // Parse command
-                    let response = match ImapParser::parse(&line) {
-                        Some(cmd) => {
-                            Self::handle_command(cmd, &session, &db_pool, &config.storage_path).await
-                        }
-                        None => {
-                            "* BAD Invalid command\r\n".to_string()
-                        }
+                    let parsed = ImapParser::parse(&line);
+                    let mut do_starttls = false;
+                    let response = match parsed {
+                        Some(cmd) => match cmd.command {
+                            ImapCommand::StartTls => {
+                                let sess = session.lock().await;
+                                if sess.is_authenticated() {
+                                    ImapResponse::bad(
+                                        &cmd.tag,
+                                        "STARTTLS not allowed after authentication",
+                                    )
+                                } else if !config.starttls || tls_acceptor.is_none() {
+                                    ImapResponse::bad(&cmd.tag, "STARTTLS not available")
+                                } else {
+                                    do_starttls = true;
+                                    ImapResponse::ok(&cmd.tag, "Begin TLS negotiation now")
+                                }
+                            }
+                            ImapCommand::Capability => {
+                                let advertise_starttls = config.starttls && tls_acceptor.is_some();
+                                format!(
+                                    "{}{}",
+                                    ImapResponse::capability_with_starttls(advertise_starttls),
+                                    ImapResponse::ok(&cmd.tag, "CAPABILITY completed")
+                                )
+                            }
+                            other => {
+                                let tagged = TaggedCommand {
+                                    tag: cmd.tag,
+                                    command: other,
+                                };
+                                Self::handle_command(
+                                    tagged,
+                                    &session,
+                                    &db_pool,
+                                    &config.storage_path,
+                                )
+                                .await
+                            }
+                        },
+                        None => "* BAD Invalid command\r\n".to_string(),
                     };
 
                     // Send response
@@ -164,6 +240,27 @@ impl ImapServer {
                         let mut w = writer.lock().await;
                         w.write_all(response.as_bytes()).await?;
                         w.flush().await?;
+                    }
+
+                    if do_starttls {
+                        let acceptor = tls_acceptor.clone().ok_or_else(|| {
+                            anyhow!("IMAP STARTTLS requested without configured acceptor")
+                        })?;
+
+                        let read_half = reader.into_inner();
+                        let writer_half = Arc::try_unwrap(writer)
+                            .map_err(|_| anyhow!("Failed to unwrap IMAP writer during STARTTLS"))?
+                            .into_inner();
+                        let tcp_stream = read_half.reunite(writer_half).map_err(|_| {
+                            anyhow!("Failed to reunite IMAP stream halves during STARTTLS")
+                        })?;
+                        let tls_stream = acceptor.accept(tcp_stream).await?;
+                        info!("IMAP STARTTLS negotiation completed for {}", addr);
+
+                        return Self::handle_tls_connection(
+                            tls_stream, addr, db_pool, config, session,
+                        )
+                        .await;
                     }
 
                     // Check if we should close
@@ -193,6 +290,85 @@ impl ImapServer {
         Ok(())
     }
 
+    async fn handle_tls_connection(
+        tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
+        addr: SocketAddr,
+        db_pool: DatabasePool,
+        config: ImapConfig,
+        session: Arc<Mutex<ImapSession>>,
+    ) -> Result<()> {
+        let (reader, writer) = tokio::io::split(tls_stream);
+        let mut reader = BufReader::new(reader);
+        let writer = Arc::new(Mutex::new(writer));
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let read_result = tokio::time::timeout(
+                std::time::Duration::from_secs((config.timeout_minutes * 60) as u64),
+                reader.read_line(&mut line),
+            )
+            .await;
+
+            match read_result {
+                Ok(Ok(0)) => break,
+                Ok(Ok(_)) => {
+                    let response = match ImapParser::parse(&line) {
+                        Some(cmd) => match cmd.command {
+                            ImapCommand::StartTls => {
+                                ImapResponse::bad(&cmd.tag, "TLS already active")
+                            }
+                            ImapCommand::Capability => format!(
+                                "{}{}",
+                                ImapResponse::capability_with_starttls(false),
+                                ImapResponse::ok(&cmd.tag, "CAPABILITY completed")
+                            ),
+                            other => {
+                                let tagged = TaggedCommand {
+                                    tag: cmd.tag,
+                                    command: other,
+                                };
+                                Self::handle_command(
+                                    tagged,
+                                    &session,
+                                    &db_pool,
+                                    &config.storage_path,
+                                )
+                                .await
+                            }
+                        },
+                        None => "* BAD Invalid command\r\n".to_string(),
+                    };
+
+                    {
+                        let mut w = writer.lock().await;
+                        w.write_all(response.as_bytes()).await?;
+                        w.flush().await?;
+                    }
+
+                    let sess = session.lock().await;
+                    if sess.state == SessionState::Logout {
+                        break;
+                    }
+                }
+                Ok(Err(e)) => {
+                    error!("TLS read error from {}: {}", addr, e);
+                    break;
+                }
+                Err(_) => {
+                    warn!("TLS connection timeout for {}", addr);
+                    let mut w = writer.lock().await;
+                    w.write_all(ImapResponse::bye("Connection timeout").as_bytes())
+                        .await?;
+                    break;
+                }
+            }
+        }
+
+        info!("IMAP TLS connection closed for {}", addr);
+        Ok(())
+    }
+
     /// Handle a parsed IMAP command
     async fn handle_command(
         cmd: TaggedCommand,
@@ -205,7 +381,11 @@ impl ImapServer {
         match cmd.command {
             // Any state commands
             ImapCommand::Capability => {
-                format!("{}{}", ImapResponse::capability(), ImapResponse::ok(tag, "CAPABILITY completed"))
+                format!(
+                    "{}{}",
+                    ImapResponse::capability(),
+                    ImapResponse::ok(tag, "CAPABILITY completed")
+                )
             }
             ImapCommand::Noop => {
                 session.lock().await.update_activity();
@@ -219,12 +399,16 @@ impl ImapServer {
                     ImapResponse::ok(tag, "LOGOUT completed")
                 )
             }
+            ImapCommand::StartTls => ImapResponse::bad(tag, "Use STARTTLS before authentication"),
 
             // Authentication
             ImapCommand::Login { username, password } => {
                 Self::handle_login(tag, &username, &password, session, db_pool).await
             }
-            ImapCommand::Authenticate { mechanism, initial_response } => {
+            ImapCommand::Authenticate {
+                mechanism,
+                initial_response,
+            } => {
                 // For now, only support PLAIN
                 if mechanism != "PLAIN" {
                     return ImapResponse::no(tag, "Unsupported authentication mechanism");
@@ -269,8 +453,13 @@ impl ImapServer {
                     ImapResponse::no(tag, "No mailbox selected")
                 }
             }
-            ImapCommand::Fetch { sequence, items, uid } => {
-                Self::handle_fetch(tag, &sequence, &items, uid, session, db_pool, storage_path).await
+            ImapCommand::Fetch {
+                sequence,
+                items,
+                uid,
+            } => {
+                Self::handle_fetch(tag, &sequence, &items, uid, session, db_pool, storage_path)
+                    .await
             }
             ImapCommand::Search { criteria, uid } => {
                 Self::handle_search(tag, &criteria, uid, session, db_pool).await
@@ -283,9 +472,10 @@ impl ImapServer {
             ImapCommand::Delete { mailbox } => {
                 Self::handle_delete(tag, &mailbox, session, db_pool).await
             }
-            ImapCommand::Rename { old_mailbox, new_mailbox } => {
-                Self::handle_rename(tag, &old_mailbox, &new_mailbox, session, db_pool).await
-            }
+            ImapCommand::Rename {
+                old_mailbox,
+                new_mailbox,
+            } => Self::handle_rename(tag, &old_mailbox, &new_mailbox, session, db_pool).await,
             ImapCommand::Subscribe { mailbox } => {
                 Self::handle_subscribe(tag, &mailbox, true, session, db_pool).await
             }
@@ -294,20 +484,39 @@ impl ImapServer {
             }
 
             // Write operations - Message operations
-            ImapCommand::Store { sequence, flags, uid } => {
-                Self::handle_store(tag, &sequence, &flags, uid, session, db_pool).await
-            }
-            ImapCommand::Copy { sequence, mailbox, uid } => {
-                Self::handle_copy(tag, &sequence, &mailbox, uid, session, db_pool).await
-            }
-            ImapCommand::Move { sequence, mailbox, uid } => {
-                Self::handle_move(tag, &sequence, &mailbox, uid, session, db_pool).await
-            }
-            ImapCommand::Expunge => {
-                Self::handle_expunge(tag, session, db_pool).await
-            }
-            ImapCommand::Append { mailbox, flags, date, message } => {
-                Self::handle_append(tag, &mailbox, &flags, date.as_deref(), &message, session, db_pool, storage_path).await
+            ImapCommand::Store {
+                sequence,
+                flags,
+                uid,
+            } => Self::handle_store(tag, &sequence, &flags, uid, session, db_pool).await,
+            ImapCommand::Copy {
+                sequence,
+                mailbox,
+                uid,
+            } => Self::handle_copy(tag, &sequence, &mailbox, uid, session, db_pool).await,
+            ImapCommand::Move {
+                sequence,
+                mailbox,
+                uid,
+            } => Self::handle_move(tag, &sequence, &mailbox, uid, session, db_pool).await,
+            ImapCommand::Expunge => Self::handle_expunge(tag, session, db_pool).await,
+            ImapCommand::Append {
+                mailbox,
+                flags,
+                date,
+                message,
+            } => {
+                Self::handle_append(
+                    tag,
+                    &mailbox,
+                    &flags,
+                    date.as_deref(),
+                    &message,
+                    session,
+                    db_pool,
+                    storage_path,
+                )
+                .await
             }
 
             // Extensions
@@ -316,9 +525,7 @@ impl ImapServer {
                 // For now, just acknowledge and wait for DONE
                 ImapResponse::continue_req()
             }
-            ImapCommand::Done => {
-                ImapResponse::ok(tag, "IDLE terminated")
-            }
+            ImapCommand::Done => ImapResponse::ok(tag, "IDLE terminated"),
             ImapCommand::Namespace => {
                 format!(
                     "{}{}",
@@ -443,8 +650,21 @@ impl ImapServer {
                 let mut response = String::new();
 
                 // Send mailbox information
-                response.push_str(&ImapResponse::mailbox_flags(&["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft"]));
-                response.push_str(&ImapResponse::permanent_flags(&["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft", "\\*"]));
+                response.push_str(&ImapResponse::mailbox_flags(&[
+                    "\\Answered",
+                    "\\Flagged",
+                    "\\Deleted",
+                    "\\Seen",
+                    "\\Draft",
+                ]));
+                response.push_str(&ImapResponse::permanent_flags(&[
+                    "\\Answered",
+                    "\\Flagged",
+                    "\\Deleted",
+                    "\\Seen",
+                    "\\Draft",
+                    "\\*",
+                ]));
                 response.push_str(&ImapResponse::exists(selected.exists));
                 response.push_str(&ImapResponse::recent(selected.recent));
 
@@ -459,8 +679,15 @@ impl ImapServer {
                 let mut sess = session.lock().await;
                 sess.select(selected, readonly);
 
-                let mode = if readonly { "[READ-ONLY]" } else { "[READ-WRITE]" };
-                response.push_str(&ImapResponse::ok(tag, &format!("{} SELECT completed", mode)));
+                let mode = if readonly {
+                    "[READ-ONLY]"
+                } else {
+                    "[READ-WRITE]"
+                };
+                response.push_str(&ImapResponse::ok(
+                    tag,
+                    &format!("{} SELECT completed", mode),
+                ));
 
                 response
             }
@@ -517,7 +744,10 @@ impl ImapServer {
 
         // Filter mailboxes by pattern
         for (address,) in mailboxes {
-            if pattern == "*" || pattern == "%" || address.contains(pattern.trim_matches('*').trim_matches('%')) {
+            if pattern == "*"
+                || pattern == "%"
+                || address.contains(pattern.trim_matches('*').trim_matches('%'))
+            {
                 response.push_str(&ImapResponse::list(&["\\HasNoChildren"], "/", &address));
             }
         }
@@ -568,13 +798,12 @@ impl ImapServer {
         match mailbox {
             Some((mailbox_id,)) => {
                 // Get message counts
-                let total: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1",
-                )
-                .bind(mailbox_id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or((0,));
+                let total: (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM messages WHERE mailbox_id = $1")
+                        .bind(mailbox_id)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or((0,));
 
                 let unseen: (i64,) = sqlx::query_as(
                     "SELECT COUNT(*) FROM messages WHERE mailbox_id = $1 AND seen = false",
@@ -590,7 +819,9 @@ impl ImapServer {
                         "MESSAGES" => status_items.push(("MESSAGES".to_string(), total.0 as u32)),
                         "UNSEEN" => status_items.push(("UNSEEN".to_string(), unseen.0 as u32)),
                         "RECENT" => status_items.push(("RECENT".to_string(), 0)),
-                        "UIDNEXT" => status_items.push(("UIDNEXT".to_string(), (total.0 + 1) as u32)),
+                        "UIDNEXT" => {
+                            status_items.push(("UIDNEXT".to_string(), (total.0 + 1) as u32))
+                        }
                         "UIDVALIDITY" => status_items.push(("UIDVALIDITY".to_string(), 1)),
                         _ => {}
                     }
@@ -630,13 +861,12 @@ impl ImapServer {
         let pool = db_pool.pool();
 
         // Get messages for the sequence set
-        let messages: Vec<Message> = sqlx::query_as(
-            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
-        )
-        .bind(selected.id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        let messages: Vec<Message> =
+            sqlx::query_as("SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC")
+                .bind(selected.id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
 
         // Initialize storage for reading full message bodies
         let storage = match LocalStorage::from_path(storage_path) {
@@ -703,44 +933,74 @@ impl ImapServer {
                         fetch_items.push(("ENVELOPE".to_string(), envelope));
                     }
                     FetchItem::BodyStructure | FetchItem::Body => {
-                        let lines = msg.body_preview.as_ref().map(|p| p.lines().count() as u32).unwrap_or(0);
-                        let structure = ImapResponse::format_body_structure_simple(msg.body_size as u64, lines);
+                        let lines = msg
+                            .body_preview
+                            .as_ref()
+                            .map(|p| p.lines().count() as u32)
+                            .unwrap_or(0);
+                        let structure =
+                            ImapResponse::format_body_structure_simple(msg.body_size as u64, lines);
                         fetch_items.push(("BODYSTRUCTURE".to_string(), structure));
                     }
                     FetchItem::All => {
                         // FLAGS, INTERNALDATE, RFC822.SIZE, ENVELOPE
                         let flags = ImapResponse::format_flags(
-                            msg.seen, msg.answered, msg.flagged, msg.deleted, msg.draft,
+                            msg.seen,
+                            msg.answered,
+                            msg.flagged,
+                            msg.deleted,
+                            msg.draft,
                         );
                         fetch_items.push(("FLAGS".to_string(), flags));
-                        fetch_items.push(("INTERNALDATE".to_string(),
-                            ImapResponse::format_internal_date(&msg.received_at)));
+                        fetch_items.push((
+                            "INTERNALDATE".to_string(),
+                            ImapResponse::format_internal_date(&msg.received_at),
+                        ));
                         fetch_items.push(("RFC822.SIZE".to_string(), msg.body_size.to_string()));
                     }
                     FetchItem::Fast => {
                         // FLAGS, INTERNALDATE, RFC822.SIZE
                         let flags = ImapResponse::format_flags(
-                            msg.seen, msg.answered, msg.flagged, msg.deleted, msg.draft,
+                            msg.seen,
+                            msg.answered,
+                            msg.flagged,
+                            msg.deleted,
+                            msg.draft,
                         );
                         fetch_items.push(("FLAGS".to_string(), flags));
-                        fetch_items.push(("INTERNALDATE".to_string(),
-                            ImapResponse::format_internal_date(&msg.received_at)));
+                        fetch_items.push((
+                            "INTERNALDATE".to_string(),
+                            ImapResponse::format_internal_date(&msg.received_at),
+                        ));
                         fetch_items.push(("RFC822.SIZE".to_string(), msg.body_size.to_string()));
                     }
                     FetchItem::Full => {
                         // FLAGS, INTERNALDATE, RFC822.SIZE, ENVELOPE, BODY
                         let flags = ImapResponse::format_flags(
-                            msg.seen, msg.answered, msg.flagged, msg.deleted, msg.draft,
+                            msg.seen,
+                            msg.answered,
+                            msg.flagged,
+                            msg.deleted,
+                            msg.draft,
                         );
                         fetch_items.push(("FLAGS".to_string(), flags));
-                        fetch_items.push(("INTERNALDATE".to_string(),
-                            ImapResponse::format_internal_date(&msg.received_at)));
+                        fetch_items.push((
+                            "INTERNALDATE".to_string(),
+                            ImapResponse::format_internal_date(&msg.received_at),
+                        ));
                         fetch_items.push(("RFC822.SIZE".to_string(), msg.body_size.to_string()));
-                        let lines = msg.body_preview.as_ref().map(|p| p.lines().count() as u32).unwrap_or(0);
-                        fetch_items.push(("BODYSTRUCTURE".to_string(),
-                            ImapResponse::format_body_structure_simple(msg.body_size as u64, lines)));
+                        let lines = msg
+                            .body_preview
+                            .as_ref()
+                            .map(|p| p.lines().count() as u32)
+                            .unwrap_or(0);
+                        fetch_items.push((
+                            "BODYSTRUCTURE".to_string(),
+                            ImapResponse::format_body_structure_simple(msg.body_size as u64, lines),
+                        ));
                     }
-                    FetchItem::BodySection { section, .. } | FetchItem::BodyPeek { section, .. } => {
+                    FetchItem::BodySection { section, .. }
+                    | FetchItem::BodyPeek { section, .. } => {
                         // Read full message body from storage
                         let body_key = format!("BODY[{}]", section);
                         if let Some(ref storage) = storage {
@@ -750,19 +1010,26 @@ impl ImapServer {
                                     // byte length for the literal size to ensure consistency.
                                     // This avoids mismatch when non-UTF-8 bytes are replaced.
                                     let body = String::from_utf8_lossy(&data);
-                                    fetch_items.push((body_key, format!("{{{}}}\r\n{}", body.len(), body)));
+                                    fetch_items.push((
+                                        body_key,
+                                        format!("{{{}}}\r\n{}", body.len(), body),
+                                    ));
                                 }
                                 Err(e) => {
                                     // Fall back to body_preview if storage read fails
                                     warn!("Failed to read message from storage: {}", e);
                                     if let Some(preview) = &msg.body_preview {
-                                        fetch_items.push((body_key, format!("{{{}}}\r\n{}", preview.len(), preview)));
+                                        fetch_items.push((
+                                            body_key,
+                                            format!("{{{}}}\r\n{}", preview.len(), preview),
+                                        ));
                                     }
                                 }
                             }
                         } else if let Some(preview) = &msg.body_preview {
                             // No storage available, use preview
-                            fetch_items.push((body_key, format!("{{{}}}\r\n{}", preview.len(), preview)));
+                            fetch_items
+                                .push((body_key, format!("{{{}}}\r\n{}", preview.len(), preview)));
                         }
                     }
                 }
@@ -797,13 +1064,12 @@ impl ImapServer {
         let pool = db_pool.pool();
 
         // Get messages
-        let messages: Vec<Message> = sqlx::query_as(
-            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
-        )
-        .bind(selected.id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        let messages: Vec<Message> =
+            sqlx::query_as("SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC")
+                .bind(selected.id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
 
         let mut results = Vec::new();
 
@@ -847,12 +1113,11 @@ impl ImapServer {
                 let age = chrono::Utc::now() - msg.created_at;
                 age.num_hours() < 24
             }
-            SearchCriteria::From(s) => {
-                msg.from_address
-                    .as_ref()
-                    .map(|f| f.to_lowercase().contains(&s.to_lowercase()))
-                    .unwrap_or(false)
-            }
+            SearchCriteria::From(s) => msg
+                .from_address
+                .as_ref()
+                .map(|f| f.to_lowercase().contains(&s.to_lowercase()))
+                .unwrap_or(false),
             SearchCriteria::To(s) => {
                 if let Some(to) = msg.to_addresses.as_array() {
                     to.iter().any(|addr| {
@@ -864,18 +1129,16 @@ impl ImapServer {
                     false
                 }
             }
-            SearchCriteria::Subject(s) => {
-                msg.subject
-                    .as_ref()
-                    .map(|subj| subj.to_lowercase().contains(&s.to_lowercase()))
-                    .unwrap_or(false)
-            }
-            SearchCriteria::Body(s) | SearchCriteria::Text(s) => {
-                msg.body_preview
-                    .as_ref()
-                    .map(|body| body.to_lowercase().contains(&s.to_lowercase()))
-                    .unwrap_or(false)
-            }
+            SearchCriteria::Subject(s) => msg
+                .subject
+                .as_ref()
+                .map(|subj| subj.to_lowercase().contains(&s.to_lowercase()))
+                .unwrap_or(false),
+            SearchCriteria::Body(s) | SearchCriteria::Text(s) => msg
+                .body_preview
+                .as_ref()
+                .map(|body| body.to_lowercase().contains(&s.to_lowercase()))
+                .unwrap_or(false),
             SearchCriteria::Larger(size) => msg.body_size > (*size as i64),
             SearchCriteria::Smaller(size) => msg.body_size < (*size as i64),
             SearchCriteria::Not(inner) => !Self::matches_criteria(msg, inner),
@@ -924,15 +1187,14 @@ impl ImapServer {
         let pool = db_pool.pool();
 
         // Check if mailbox already exists
-        let exists: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
-        )
-        .bind(tenant_id)
-        .bind(mailbox_name)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
+        let exists: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2")
+                .bind(tenant_id)
+                .bind(mailbox_name)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
 
         if exists.is_some() {
             return ImapResponse::no(tag, "Mailbox already exists");
@@ -1077,7 +1339,10 @@ impl ImapServer {
 
         match result {
             Ok(r) if r.rows_affected() > 0 => {
-                info!("Renamed mailbox {} to {} for user {}", old_name, new_name, user_id);
+                info!(
+                    "Renamed mailbox {} to {} for user {}",
+                    old_name, new_name, user_id
+                );
                 ImapResponse::ok(tag, "RENAME completed")
             }
             Ok(_) => ImapResponse::no(tag, "Mailbox not found"),
@@ -1104,7 +1369,11 @@ impl ImapServer {
 
         // For now, we don't track subscriptions separately - all mailboxes are subscribed
         // This could be implemented with a mailbox_subscriptions table
-        let action = if subscribe { "SUBSCRIBE" } else { "UNSUBSCRIBE" };
+        let action = if subscribe {
+            "SUBSCRIBE"
+        } else {
+            "UNSUBSCRIBE"
+        };
         debug!("{} to mailbox {}", action, mailbox_name);
 
         ImapResponse::ok(tag, &format!("{} completed", action))
@@ -1142,13 +1411,12 @@ impl ImapServer {
         let pool = db_pool.pool();
 
         // Get messages for the sequence set
-        let messages: Vec<Message> = sqlx::query_as(
-            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
-        )
-        .bind(selected.id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        let messages: Vec<Message> =
+            sqlx::query_as("SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC")
+                .bind(selected.id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
 
         let mut response = String::new();
         let max_seq = messages.len() as u32;
@@ -1194,7 +1462,11 @@ impl ImapServer {
             // If not silent, send FETCH response with new flags
             if !flags.silent {
                 let flags_str = ImapResponse::format_flags(
-                    new_seen, new_answered, new_flagged, new_deleted, new_draft,
+                    new_seen,
+                    new_answered,
+                    new_flagged,
+                    new_deleted,
+                    new_draft,
                 );
                 let mut fetch_items = vec![("FLAGS".to_string(), flags_str)];
                 if uid_mode {
@@ -1336,7 +1608,9 @@ impl ImapServer {
 
         let dest_id = match dest_mailbox_query.fetch_optional(pool).await {
             Ok(Some((id,))) => id,
-            Ok(None) => return ImapResponse::no(tag, "[TRYCREATE] Destination mailbox does not exist"),
+            Ok(None) => {
+                return ImapResponse::no(tag, "[TRYCREATE] Destination mailbox does not exist")
+            }
             Err(e) => {
                 error!("Failed to find destination mailbox: {}", e);
                 return ImapResponse::no(tag, "Failed to find destination mailbox");
@@ -1344,13 +1618,12 @@ impl ImapServer {
         };
 
         // Get source messages
-        let messages: Vec<Message> = sqlx::query_as(
-            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
-        )
-        .bind(selected.id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        let messages: Vec<Message> =
+            sqlx::query_as("SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC")
+                .bind(selected.id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
 
         let max_seq = messages.len() as u32;
         let mut source_uids = Vec::new();
@@ -1467,7 +1740,9 @@ impl ImapServer {
 
         let dest_id = match dest_mailbox_query.fetch_optional(pool).await {
             Ok(Some((id,))) => id,
-            Ok(None) => return ImapResponse::no(tag, "[TRYCREATE] Destination mailbox does not exist"),
+            Ok(None) => {
+                return ImapResponse::no(tag, "[TRYCREATE] Destination mailbox does not exist")
+            }
             Err(e) => {
                 error!("Failed to find destination mailbox: {}", e);
                 return ImapResponse::no(tag, "Failed to find destination mailbox");
@@ -1475,13 +1750,12 @@ impl ImapServer {
         };
 
         // Get source messages
-        let messages: Vec<Message> = sqlx::query_as(
-            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
-        )
-        .bind(selected.id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        let messages: Vec<Message> =
+            sqlx::query_as("SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC")
+                .bind(selected.id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
 
         let max_seq = messages.len() as u32;
         let mut response = String::new();
@@ -1504,13 +1778,11 @@ impl ImapServer {
             }
 
             // Move the message (update mailbox_id)
-            let move_result = sqlx::query(
-                "UPDATE messages SET mailbox_id = $2 WHERE id = $1",
-            )
-            .bind(msg.id)
-            .bind(dest_id)
-            .execute(pool)
-            .await;
+            let move_result = sqlx::query("UPDATE messages SET mailbox_id = $2 WHERE id = $1")
+                .bind(msg.id)
+                .bind(dest_id)
+                .execute(pool)
+                .await;
 
             match move_result {
                 Ok(_) => {
@@ -1537,7 +1809,10 @@ impl ImapServer {
                 &source_uids.join(","),
                 &dest_uids.join(","),
             );
-            response.push_str(&ImapResponse::ok(tag, &format!("{} MOVE completed", copyuid)));
+            response.push_str(&ImapResponse::ok(
+                tag,
+                &format!("{} MOVE completed", copyuid),
+            ));
         }
 
         response
@@ -1567,13 +1842,12 @@ impl ImapServer {
         let pool = db_pool.pool();
 
         // Get messages marked for deletion
-        let messages: Vec<Message> = sqlx::query_as(
-            "SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC",
-        )
-        .bind(selected.id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        let messages: Vec<Message> =
+            sqlx::query_as("SELECT * FROM messages WHERE mailbox_id = $1 ORDER BY received_at ASC")
+                .bind(selected.id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
 
         let mut response = String::new();
         let mut deleted_count = 0;
@@ -1587,7 +1861,12 @@ impl ImapServer {
         }
 
         // Delete messages and send EXPUNGE responses
-        for (offset, (idx, msg)) in messages.iter().enumerate().filter(|(_, m)| m.deleted).enumerate() {
+        for (offset, (idx, msg)) in messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.deleted)
+            .enumerate()
+        {
             let seq = (idx + 1 - offset) as u32; // Adjust for already deleted messages
 
             let delete_result = sqlx::query("DELETE FROM messages WHERE id = $1")
@@ -1601,7 +1880,10 @@ impl ImapServer {
             }
         }
 
-        info!("Expunged {} messages from mailbox {}", deleted_count, selected.name);
+        info!(
+            "Expunged {} messages from mailbox {}",
+            deleted_count, selected.name
+        );
         response.push_str(&ImapResponse::ok(tag, "EXPUNGE completed"));
         response
     }
@@ -1685,7 +1967,10 @@ impl ImapServer {
         // Create the message
         let message_id = Uuid::new_v4();
         // Create preview from first 500 characters of message for quick display
-        let body_preview = String::from_utf8_lossy(message).chars().take(500).collect::<String>();
+        let body_preview = String::from_utf8_lossy(message)
+            .chars()
+            .take(500)
+            .collect::<String>();
         let storage_path = format!("{}/{}/{}.eml", tenant_id, mailbox_id, message_id);
 
         // Initialize file storage and store the FULL message
@@ -1727,7 +2012,10 @@ impl ImapServer {
             Ok(_) => {
                 let uid = Self::message_id_to_uid(&message_id);
                 let appenduid = ImapResponse::appenduid(1, uid);
-                info!("Appended message {} to mailbox {}", message_id, mailbox_name);
+                info!(
+                    "Appended message {} to mailbox {}",
+                    message_id, mailbox_name
+                );
                 ImapResponse::ok(tag, &format!("{} APPEND completed", appenduid))
             }
             Err(e) => {

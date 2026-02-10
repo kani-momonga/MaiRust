@@ -231,7 +231,7 @@ impl Default for SmtpConfig {
             max_recipients: default_max_recipients(),
             max_connections: Some(100),
             connection_timeout_secs: default_connection_timeout(),
-            tls_enabled: Some(false),
+            tls_enabled: Some(true),
             auth_required: Some(false),
             require_tls_for_auth: default_require_tls_for_auth(),
         }

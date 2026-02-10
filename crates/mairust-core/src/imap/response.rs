@@ -32,7 +32,20 @@ pub struct ImapResponse;
 impl ImapResponse {
     /// Server greeting
     pub fn greeting() -> String {
-        "* OK [CAPABILITY IMAP4rev1 LITERAL+ SASL-IR LOGIN AUTH=PLAIN] MaiRust IMAP server ready\r\n".to_string()
+        Self::greeting_with_starttls(false)
+    }
+
+    /// Server greeting with optional STARTTLS capability
+    pub fn greeting_with_starttls(starttls_enabled: bool) -> String {
+        let mut capabilities = vec!["IMAP4rev1", "LITERAL+", "SASL-IR", "LOGIN", "AUTH=PLAIN"];
+        if starttls_enabled {
+            capabilities.push("STARTTLS");
+        }
+
+        format!(
+            "* OK [CAPABILITY {}] MaiRust IMAP server ready\r\n",
+            capabilities.join(" ")
+        )
     }
 
     /// Tagged OK response
@@ -57,7 +70,26 @@ impl ImapResponse {
 
     /// CAPABILITY response
     pub fn capability() -> String {
-        "* CAPABILITY IMAP4rev1 LITERAL+ SASL-IR LOGIN AUTH=PLAIN IDLE NAMESPACE MOVE UIDPLUS\r\n".to_string()
+        Self::capability_with_starttls(false)
+    }
+
+    /// CAPABILITY response with optional STARTTLS extension
+    pub fn capability_with_starttls(starttls_enabled: bool) -> String {
+        let mut capabilities = vec![
+            "IMAP4rev1",
+            "LITERAL+",
+            "SASL-IR",
+            "LOGIN",
+            "AUTH=PLAIN",
+            "IDLE",
+            "NAMESPACE",
+            "MOVE",
+            "UIDPLUS",
+        ];
+        if starttls_enabled {
+            capabilities.push("STARTTLS");
+        }
+        format!("* CAPABILITY {}\r\n", capabilities.join(" "))
     }
 
     /// Update CAPABILITY in greeting to include write operations
@@ -147,7 +179,12 @@ impl ImapResponse {
     }
 
     /// FETCH with literal body
-    pub fn fetch_with_body(seq: u32, items: &[(String, String)], body_key: &str, body: &str) -> String {
+    pub fn fetch_with_body(
+        seq: u32,
+        items: &[(String, String)],
+        body_key: &str,
+        body: &str,
+    ) -> String {
         let items_str: Vec<String> = items.iter().map(|(k, v)| format!("{} {}", k, v)).collect();
         let literal_len = body.len();
         let mut parts = items_str;
@@ -166,7 +203,13 @@ impl ImapResponse {
     }
 
     /// Format flags for FETCH
-    pub fn format_flags(seen: bool, answered: bool, flagged: bool, deleted: bool, draft: bool) -> String {
+    pub fn format_flags(
+        seen: bool,
+        answered: bool,
+        flagged: bool,
+        deleted: bool,
+        draft: bool,
+    ) -> String {
         let mut flags = Vec::new();
         if seen {
             flags.push("\\Seen");
@@ -200,12 +243,18 @@ impl ImapResponse {
         cc: Option<&str>,
         message_id: Option<&str>,
     ) -> String {
-        let date_str = date.map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "NIL".to_string());
-        let subject_str = subject.map(|s| format!("\"{}\"", Self::quote_string(s))).unwrap_or_else(|| "NIL".to_string());
+        let date_str = date
+            .map(|s| format!("\"{}\"", s))
+            .unwrap_or_else(|| "NIL".to_string());
+        let subject_str = subject
+            .map(|s| format!("\"{}\"", Self::quote_string(s)))
+            .unwrap_or_else(|| "NIL".to_string());
         let from_str = Self::format_address_list(from);
         let to_str = Self::format_address_list(to);
         let cc_str = Self::format_address_list(cc);
-        let message_id_str = message_id.map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "NIL".to_string());
+        let message_id_str = message_id
+            .map(|s| format!("\"{}\"", s))
+            .unwrap_or_else(|| "NIL".to_string());
 
         // Full envelope: (date subject from sender reply-to to cc bcc in-reply-to message-id)
         format!(

@@ -73,13 +73,23 @@ impl Pop3Response {
 
     /// CAPA response
     pub fn capabilities() -> String {
-        "+OK Capability list follows\r\n\
-         USER\r\n\
-         TOP\r\n\
-         UIDL\r\n\
-         IMPLEMENTATION MaiRust-POP3\r\n\
-         .\r\n"
-            .to_string()
+        Self::capabilities_with_starttls(false)
+    }
+
+    /// CAPA response with optional STLS extension
+    pub fn capabilities_with_starttls(starttls_enabled: bool) -> String {
+        let mut lines = vec![
+            "+OK Capability list follows".to_string(),
+            "USER".to_string(),
+            "TOP".to_string(),
+            "UIDL".to_string(),
+        ];
+        if starttls_enabled {
+            lines.push("STLS".to_string());
+        }
+        lines.push("IMPLEMENTATION MaiRust-POP3".to_string());
+        lines.push(".".to_string());
+        format!("{}\r\n", lines.join("\r\n"))
     }
 
     /// Multi-line terminator

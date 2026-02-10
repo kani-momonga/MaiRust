@@ -2,7 +2,9 @@
 //!
 //! Parses IMAP4 commands from client input.
 
-use super::command::{FetchItem, ImapCommand, SearchCriteria, SequenceSet, StoreFlags, StoreOperation, TaggedCommand};
+use super::command::{
+    FetchItem, ImapCommand, SearchCriteria, SequenceSet, StoreFlags, StoreOperation, TaggedCommand,
+};
 use tracing::debug;
 
 /// IMAP command parser
@@ -42,6 +44,7 @@ impl ImapParser {
             "CAPABILITY" => Some(ImapCommand::Capability),
             "NOOP" => Some(ImapCommand::Noop),
             "LOGOUT" => Some(ImapCommand::Logout),
+            "STARTTLS" => Some(ImapCommand::StartTls),
 
             // Not authenticated
             "LOGIN" => Self::parse_login(args),
@@ -88,9 +91,7 @@ impl ImapParser {
             "DONE" => Some(ImapCommand::Done),
             "NAMESPACE" => Some(ImapCommand::Namespace),
 
-            _ => Some(ImapCommand::Unknown {
-                command: cmd_name,
-            }),
+            _ => Some(ImapCommand::Unknown { command: cmd_name }),
         }
     }
 
@@ -135,7 +136,10 @@ impl ImapParser {
         // Parse items list
         let items = if rest.starts_with('(') && rest.ends_with(')') {
             let content = rest.strip_prefix('(')?.strip_suffix(')')?;
-            content.split_whitespace().map(|s| s.to_uppercase()).collect()
+            content
+                .split_whitespace()
+                .map(|s| s.to_uppercase())
+                .collect()
         } else {
             vec![]
         };
@@ -271,7 +275,9 @@ impl ImapParser {
             "COPY" => Self::parse_copy(subargs, true),
             "MOVE" => Self::parse_move(subargs, true),
             "EXPUNGE" => Some(ImapCommand::Expunge),
-            _ => Some(ImapCommand::Unknown { command: format!("UID {}", subcmd) }),
+            _ => Some(ImapCommand::Unknown {
+                command: format!("UID {}", subcmd),
+            }),
         }
     }
 
@@ -279,7 +285,10 @@ impl ImapParser {
     fn parse_rename(args: &str) -> Option<ImapCommand> {
         let (old_mailbox, rest) = Self::parse_astring(args)?;
         let (new_mailbox, _) = Self::parse_astring(rest.trim())?;
-        Some(ImapCommand::Rename { old_mailbox, new_mailbox })
+        Some(ImapCommand::Rename {
+            old_mailbox,
+            new_mailbox,
+        })
     }
 
     /// Parse STORE command
@@ -296,7 +305,11 @@ impl ImapParser {
         // Parse the flag operation and flags
         let flags = Self::parse_store_flags(rest)?;
 
-        Some(ImapCommand::Store { sequence, flags, uid })
+        Some(ImapCommand::Store {
+            sequence,
+            flags,
+            uid,
+        })
     }
 
     /// Parse STORE flags specification
@@ -323,7 +336,11 @@ impl ImapParser {
         // Parse flags list
         let flags = Self::parse_flags_list(rest);
 
-        Some(StoreFlags { operation, silent, flags })
+        Some(StoreFlags {
+            operation,
+            silent,
+            flags,
+        })
     }
 
     /// Parse a parenthesized flags list
@@ -332,15 +349,12 @@ impl ImapParser {
 
         // Handle parenthesized list
         let content = if args.starts_with('(') && args.ends_with(')') {
-            &args[1..args.len()-1]
+            &args[1..args.len() - 1]
         } else {
             args
         };
 
-        content
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect()
+        content.split_whitespace().map(|s| s.to_string()).collect()
     }
 
     /// Parse COPY command
@@ -354,7 +368,11 @@ impl ImapParser {
         let sequence = SequenceSet::parse(parts[0])?;
         let mailbox = Self::parse_mailbox(parts[1]);
 
-        Some(ImapCommand::Copy { sequence, mailbox, uid })
+        Some(ImapCommand::Copy {
+            sequence,
+            mailbox,
+            uid,
+        })
     }
 
     /// Parse MOVE command (IMAP extension)
@@ -368,7 +386,11 @@ impl ImapParser {
         let sequence = SequenceSet::parse(parts[0])?;
         let mailbox = Self::parse_mailbox(parts[1]);
 
-        Some(ImapCommand::Move { sequence, mailbox, uid })
+        Some(ImapCommand::Move {
+            sequence,
+            mailbox,
+            uid,
+        })
     }
 
     /// Parse APPEND command
@@ -386,7 +408,10 @@ impl ImapParser {
         if remaining.starts_with('(') {
             if let Some(end) = remaining.find(')') {
                 let flags_str = &remaining[1..end];
-                flags = flags_str.split_whitespace().map(|s| s.to_string()).collect();
+                flags = flags_str
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
                 remaining = remaining[end + 1..].trim();
             }
         }
@@ -501,7 +526,12 @@ mod tests {
     #[test]
     fn test_parse_fetch() {
         let cmd = ImapParser::parse("A004 FETCH 1:* (FLAGS UID)").unwrap();
-        if let ImapCommand::Fetch { sequence, items, uid } = cmd.command {
+        if let ImapCommand::Fetch {
+            sequence,
+            items,
+            uid,
+        } = cmd.command
+        {
             assert!(!uid);
             assert!(matches!(sequence, SequenceSet::Range(1, _)));
             assert_eq!(items.len(), 2);
@@ -513,7 +543,12 @@ mod tests {
     #[test]
     fn test_parse_uid_fetch() {
         let cmd = ImapParser::parse("A005 UID FETCH 1:100 FLAGS").unwrap();
-        if let ImapCommand::Fetch { sequence, items, uid } = cmd.command {
+        if let ImapCommand::Fetch {
+            sequence,
+            items,
+            uid,
+        } = cmd.command
+        {
             assert!(uid);
             assert!(matches!(sequence, SequenceSet::Range(1, 100)));
         } else {

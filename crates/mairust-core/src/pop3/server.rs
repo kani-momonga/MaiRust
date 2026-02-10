@@ -6,8 +6,9 @@ use super::command::{Pop3Command, Pop3Parser};
 use super::response::Pop3Response;
 use super::session::{MessageInfo, Pop3Session, SessionState};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use mairust_common::config::TlsConfig;
 use mairust_storage::db::DatabasePool;
 use mairust_storage::models::Message;
 use mairust_storage::{FileStorage, LocalStorage};
@@ -18,6 +19,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -81,27 +83,62 @@ impl Default for Pop3Config {
 pub struct Pop3Server {
     config: Pop3Config,
     db_pool: DatabasePool,
+    tls_acceptor: Option<Arc<TlsAcceptor>>,
 }
 
 impl Pop3Server {
     /// Create a new POP3 server
     pub fn new(config: Pop3Config, db_pool: DatabasePool) -> Self {
-        Self { config, db_pool }
+        Self {
+            config,
+            db_pool,
+            tls_acceptor: None,
+        }
+    }
+
+    pub fn with_tls(config: Pop3Config, db_pool: DatabasePool, tls: Option<&TlsConfig>) -> Self {
+        let tls_acceptor =
+            tls.and_then(
+                |tls_config| match crate::smtp::create_tls_acceptor(tls_config) {
+                    Ok(acceptor) => Some(Arc::new(acceptor)),
+                    Err(e) => {
+                        warn!("Failed to initialize POP3 STLS acceptor: {}", e);
+                        None
+                    }
+                },
+            );
+
+        Self {
+            config,
+            db_pool,
+            tls_acceptor,
+        }
     }
 
     /// Start the POP3 server
     pub async fn run(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.config.bind).await?;
-        info!("POP3 server listening on {}", self.config.bind);
+        let tls_status = if self.config.starttls && self.tls_acceptor.is_some() {
+            "STLS enabled"
+        } else {
+            "STLS disabled"
+        };
+        info!(
+            "POP3 server listening on {} ({})",
+            self.config.bind, tls_status
+        );
 
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     let db_pool = self.db_pool.clone();
                     let config = self.config.clone();
+                    let tls_acceptor = self.tls_acceptor.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(stream, addr, db_pool, config).await
+                        if let Err(e) =
+                            Self::handle_connection(stream, addr, db_pool, config, tls_acceptor)
+                                .await
                         {
                             error!("POP3 connection error from {}: {}", addr, e);
                         }
@@ -120,6 +157,7 @@ impl Pop3Server {
         addr: SocketAddr,
         db_pool: DatabasePool,
         config: Pop3Config,
+        tls_acceptor: Option<Arc<TlsAcceptor>>,
     ) -> Result<()> {
         info!("New POP3 connection from {}", addr);
 
@@ -159,8 +197,39 @@ impl Pop3Server {
 
                     // Parse and handle command
                     let cmd = Pop3Parser::parse(&line);
-                    let (response, should_quit) =
-                        Self::handle_command(cmd, &session, &db_pool, &config.storage_path).await;
+                    let mut upgrade_tls = false;
+                    let response = match cmd {
+                        Pop3Command::Stls => {
+                            let sess = session.lock().await;
+                            if !sess.is_authorization() {
+                                Pop3Response::err("STLS only allowed in AUTHORIZATION state")
+                            } else if !config.starttls || tls_acceptor.is_none() {
+                                Pop3Response::err("STLS not available")
+                            } else {
+                                upgrade_tls = true;
+                                Pop3Response::ok("Begin TLS negotiation")
+                            }
+                        }
+                        Pop3Command::Capa => Pop3Response::capabilities_with_starttls(
+                            config.starttls && tls_acceptor.is_some(),
+                        ),
+                        other => {
+                            let (resp, should_quit) = Self::handle_command(
+                                other,
+                                &session,
+                                &db_pool,
+                                &config.storage_path,
+                            )
+                            .await;
+                            if should_quit {
+                                let mut w = writer.lock().await;
+                                w.write_all(resp.as_bytes()).await?;
+                                w.flush().await?;
+                                break;
+                            }
+                            resp
+                        }
+                    };
 
                     // Send response
                     {
@@ -169,8 +238,23 @@ impl Pop3Server {
                         w.flush().await?;
                     }
 
-                    if should_quit {
-                        break;
+                    if upgrade_tls {
+                        let acceptor = tls_acceptor.clone().ok_or_else(|| {
+                            anyhow!("POP3 STLS requested without configured acceptor")
+                        })?;
+                        let read_half = reader.into_inner();
+                        let writer_half = Arc::try_unwrap(writer)
+                            .map_err(|_| anyhow!("Failed to unwrap POP3 writer during STLS"))?
+                            .into_inner();
+                        let tcp_stream = read_half.reunite(writer_half).map_err(|_| {
+                            anyhow!("Failed to reunite POP3 stream halves during STLS")
+                        })?;
+                        let tls_stream = acceptor.accept(tcp_stream).await?;
+                        info!("POP3 STLS negotiation completed for {}", addr);
+                        return Self::handle_tls_connection(
+                            tls_stream, addr, db_pool, config, session,
+                        )
+                        .await;
                     }
                 }
                 Ok(Err(e)) => {
@@ -192,6 +276,73 @@ impl Pop3Server {
         Ok(())
     }
 
+    async fn handle_tls_connection(
+        tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
+        addr: SocketAddr,
+        db_pool: DatabasePool,
+        config: Pop3Config,
+        session: Arc<Mutex<Pop3Session>>,
+    ) -> Result<()> {
+        let (reader, writer) = tokio::io::split(tls_stream);
+        let mut reader = BufReader::new(reader);
+        let writer = Arc::new(Mutex::new(writer));
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let read_result = tokio::time::timeout(
+                std::time::Duration::from_secs((config.timeout_minutes * 60) as u64),
+                reader.read_line(&mut line),
+            )
+            .await;
+
+            match read_result {
+                Ok(Ok(0)) => break,
+                Ok(Ok(_)) => {
+                    let cmd = Pop3Parser::parse(&line);
+                    let response = match cmd {
+                        Pop3Command::Stls => Pop3Response::err("TLS already active"),
+                        Pop3Command::Capa => Pop3Response::capabilities_with_starttls(false),
+                        other => {
+                            let (resp, should_quit) = Self::handle_command(
+                                other,
+                                &session,
+                                &db_pool,
+                                &config.storage_path,
+                            )
+                            .await;
+                            if should_quit {
+                                let mut w = writer.lock().await;
+                                w.write_all(resp.as_bytes()).await?;
+                                w.flush().await?;
+                                break;
+                            }
+                            resp
+                        }
+                    };
+
+                    let mut w = writer.lock().await;
+                    w.write_all(response.as_bytes()).await?;
+                    w.flush().await?;
+                }
+                Ok(Err(e)) => {
+                    error!("POP3 TLS read error from {}: {}", addr, e);
+                    break;
+                }
+                Err(_) => {
+                    warn!("POP3 TLS connection timeout for {}", addr);
+                    let mut w = writer.lock().await;
+                    w.write_all(Pop3Response::err("Session timeout").as_bytes())
+                        .await?;
+                    break;
+                }
+            }
+        }
+
+        info!("POP3 TLS connection closed for {}", addr);
+        Ok(())
+    }
+
     /// Handle a parsed POP3 command
     async fn handle_command(
         cmd: Pop3Command,
@@ -210,9 +361,7 @@ impl Pop3Server {
                 (Pop3Response::ok("Send password"), false)
             }
 
-            Pop3Command::Pass { password } => {
-                Self::handle_pass(&password, session, db_pool).await
-            }
+            Pop3Command::Pass { password } => Self::handle_pass(&password, session, db_pool).await,
 
             Pop3Command::Apop { name, digest } => {
                 // APOP not implemented yet
@@ -262,15 +411,14 @@ impl Pop3Server {
                 }
                 sess.reset_deletions();
                 (
-                    Pop3Response::ok(&format!(
-                        "Maildrop has {} messages",
-                        sess.message_count()
-                    )),
+                    Pop3Response::ok(&format!("Maildrop has {} messages", sess.message_count())),
                     false,
                 )
             }
 
-            Pop3Command::Top { msg, lines } => Self::handle_top(msg, lines, session, storage_path).await,
+            Pop3Command::Top { msg, lines } => {
+                Self::handle_top(msg, lines, session, storage_path).await
+            }
 
             Pop3Command::Uidl { msg } => Self::handle_uidl(msg, session).await,
 
@@ -279,9 +427,12 @@ impl Pop3Server {
 
             Pop3Command::Capa => (Pop3Response::capabilities(), false),
 
-            Pop3Command::Unknown { command } => {
-                (Pop3Response::err(&format!("Unknown command: {}", command)), false)
-            }
+            Pop3Command::Stls => (Pop3Response::err("Use STLS before authentication"), false),
+
+            Pop3Command::Unknown { command } => (
+                Pop3Response::err(&format!("Unknown command: {}", command)),
+                false,
+            ),
         }
     }
 
@@ -389,10 +540,7 @@ impl Pop3Server {
     }
 
     /// Handle LIST command
-    async fn handle_list(
-        msg: Option<u32>,
-        session: &Arc<Mutex<Pop3Session>>,
-    ) -> (String, bool) {
+    async fn handle_list(msg: Option<u32>, session: &Arc<Mutex<Pop3Session>>) -> (String, bool) {
         let sess = session.lock().await;
 
         if !sess.is_transaction() {
@@ -410,7 +558,8 @@ impl Pop3Server {
             }
             None => {
                 // List all messages
-                let mut response = Pop3Response::list_header(sess.message_count(), sess.total_size());
+                let mut response =
+                    Pop3Response::list_header(sess.message_count(), sess.total_size());
                 for (num, size) in sess.list_messages() {
                     response.push_str(&Pop3Response::list_line(num, size));
                 }
@@ -453,7 +602,10 @@ impl Pop3Server {
             Ok(data) => data,
             Err(e) => {
                 // Fall back to body_preview if storage read fails
-                warn!("Failed to read message from storage: {}, falling back to preview", e);
+                warn!(
+                    "Failed to read message from storage: {}, falling back to preview",
+                    e
+                );
                 let body = message_info.body_preview.unwrap_or_default();
                 // Build body content first to calculate accurate size
                 let mut body_content = String::new();
@@ -556,10 +708,7 @@ impl Pop3Server {
     }
 
     /// Handle UIDL command
-    async fn handle_uidl(
-        msg: Option<u32>,
-        session: &Arc<Mutex<Pop3Session>>,
-    ) -> (String, bool) {
+    async fn handle_uidl(msg: Option<u32>, session: &Arc<Mutex<Pop3Session>>) -> (String, bool) {
         let sess = session.lock().await;
 
         if !sess.is_transaction() {

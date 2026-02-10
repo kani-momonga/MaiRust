@@ -4,9 +4,9 @@
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use rsa::pkcs1v15::SigningKey;
-use rsa::signature::{SignatureEncoding, Signer};
-use rsa::RsaPrivateKey;
+use rsa::pkcs1v15::{Signature as RsaSignature, SigningKey, VerifyingKey};
+use rsa::signature::{SignatureEncoding, Signer, Verifier};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -283,10 +283,7 @@ impl DkimSigner {
                         result.push(':');
                         // Unfold and reduce whitespace
                         let value = value.replace("\r\n", "").replace('\t', " ");
-                        let value: String = value
-                            .split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                        let value: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
                         result.push_str(&value);
                         result.push_str("\r\n");
                     }
@@ -302,10 +299,7 @@ impl DkimSigner {
             }
             Canonicalization::Relaxed => {
                 result.push_str("dkim-signature:");
-                let value: String = dkim_header
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let value: String = dkim_header.split_whitespace().collect::<Vec<_>>().join(" ");
                 result.push_str(&value);
             }
         }
@@ -369,6 +363,19 @@ impl DkimVerifier {
             Some(bh) => bh,
             None => return DkimResult::PermError,
         };
+        let signed_headers = match tags.get("h") {
+            Some(h) => h,
+            None => return DkimResult::PermError,
+        };
+        let signature_b64 = match tags.get("b") {
+            Some(b) if !b.is_empty() => b,
+            _ => return DkimResult::PermError,
+        };
+        let algorithm = tags.get("a").map(|s| s.as_str()).unwrap_or("rsa-sha256");
+        if !algorithm.eq_ignore_ascii_case("rsa-sha256") {
+            warn!("Unsupported DKIM algorithm: {}", algorithm);
+            return DkimResult::PermError;
+        }
 
         // Fetch public key from DNS
         let dns_name = format!("{}._domainkey.{}", selector, domain);
@@ -386,11 +393,7 @@ impl DkimVerifier {
 
         // Verify body hash
         let canon = tags.get("c").map(|s| s.as_str()).unwrap_or("simple/simple");
-        let body_canon = if canon.contains("/relaxed") {
-            Canonicalization::Relaxed
-        } else {
-            Canonicalization::Simple
-        };
+        let (header_canon, body_canon) = parse_canonicalization(canon);
 
         let computed_body_hash = compute_body_hash(&body, body_canon);
         if computed_body_hash != *body_hash {
@@ -401,12 +404,63 @@ impl DkimVerifier {
             return DkimResult::Fail;
         }
 
-        // For now, we just verify the body hash
-        // Full signature verification would require more complex crypto operations
-        debug!(
-            "DKIM body hash verified for domain {} (public key: {})",
-            domain, public_key
+        let signed_headers: Vec<String> = signed_headers
+            .split(':')
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        if signed_headers.is_empty() {
+            return DkimResult::PermError;
+        }
+
+        let dkim_header_without_sig = match strip_dkim_signature_value(dkim_sig) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to strip DKIM b= value: {}", e);
+                return DkimResult::PermError;
+            }
+        };
+
+        let canonicalized_headers = canonicalize_headers_for_verification(
+            &headers,
+            &signed_headers,
+            &dkim_header_without_sig,
+            header_canon,
         );
+
+        let public_key = match parse_rsa_public_key(&public_key) {
+            Ok(key) => key,
+            Err(e) => {
+                warn!("Failed to parse DKIM public key: {}", e);
+                return DkimResult::PermError;
+            }
+        };
+
+        let signature_bytes = match BASE64.decode(signature_b64) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Invalid DKIM signature encoding: {}", e);
+                return DkimResult::PermError;
+            }
+        };
+        let signature = match RsaSignature::try_from(signature_bytes.as_slice()) {
+            Ok(sig) => sig,
+            Err(e) => {
+                warn!("Invalid DKIM RSA signature: {}", e);
+                return DkimResult::PermError;
+            }
+        };
+
+        let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+        if let Err(e) = verifying_key.verify(canonicalized_headers.as_bytes(), &signature) {
+            debug!(
+                "DKIM signature verification failed for domain {}: {}",
+                domain, e
+            );
+            return DkimResult::Fail;
+        }
+
+        debug!("DKIM signature verified for domain {}", domain);
 
         DkimResult::Pass
     }
@@ -571,6 +625,111 @@ fn compute_body_hash(body: &str, canon: Canonicalization) -> String {
     BASE64.encode(&hash)
 }
 
+fn parse_canonicalization(value: &str) -> (Canonicalization, Canonicalization) {
+    let mut parts = value.split('/');
+    let header = match parts.next().unwrap_or("simple").trim() {
+        "relaxed" => Canonicalization::Relaxed,
+        _ => Canonicalization::Simple,
+    };
+    let body = match parts.next().unwrap_or("simple").trim() {
+        "relaxed" => Canonicalization::Relaxed,
+        _ => Canonicalization::Simple,
+    };
+    (header, body)
+}
+
+fn strip_dkim_signature_value(dkim_signature_header: &str) -> Result<String> {
+    let lower = dkim_signature_header.to_ascii_lowercase();
+    let mut search_from = 0usize;
+
+    while let Some(rel_idx) = lower[search_from..].find("b=") {
+        let idx = search_from + rel_idx;
+        let tag_prefix = &lower[..idx];
+        let valid_tag_start = tag_prefix
+            .rsplit(';')
+            .next()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+
+        if valid_tag_start {
+            let value_start = idx + 2;
+            let value_end = dkim_signature_header[value_start..]
+                .find(';')
+                .map(|end| value_start + end)
+                .unwrap_or(dkim_signature_header.len());
+
+            let mut result = String::with_capacity(dkim_signature_header.len());
+            result.push_str(&dkim_signature_header[..value_start]);
+            result.push_str(&dkim_signature_header[value_end..]);
+            return Ok(result);
+        }
+
+        search_from = idx + 2;
+    }
+
+    Err(anyhow!("DKIM-Signature header does not contain b= tag"))
+}
+
+fn canonicalize_headers_for_verification(
+    headers: &HashMap<String, String>,
+    signed_headers: &[String],
+    dkim_header: &str,
+    canonicalization: Canonicalization,
+) -> String {
+    let mut result = String::new();
+
+    for header_name in signed_headers {
+        if let Some(value) = headers.get(header_name) {
+            match canonicalization {
+                Canonicalization::Simple => {
+                    result.push_str(header_name);
+                    result.push_str(": ");
+                    result.push_str(value);
+                    result.push_str("\r\n");
+                }
+                Canonicalization::Relaxed => {
+                    result.push_str(&header_name.to_lowercase());
+                    result.push(':');
+                    let value = value.replace("\r\n", "").replace('\t', " ");
+                    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+                    result.push_str(&value);
+                    result.push_str("\r\n");
+                }
+            }
+        }
+    }
+
+    match canonicalization {
+        Canonicalization::Simple => {
+            result.push_str("DKIM-Signature: ");
+            result.push_str(dkim_header);
+        }
+        Canonicalization::Relaxed => {
+            result.push_str("dkim-signature:");
+            let value = dkim_header.split_whitespace().collect::<Vec<_>>().join(" ");
+            result.push_str(&value);
+        }
+    }
+
+    result
+}
+
+fn parse_rsa_public_key(public_key_b64: &str) -> Result<RsaPublicKey> {
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
+
+    let der = BASE64
+        .decode(public_key_b64.trim())
+        .map_err(|e| anyhow!("Failed to decode DKIM public key: {}", e))?;
+
+    if let Ok(key) = RsaPublicKey::from_public_key_der(&der) {
+        return Ok(key);
+    }
+
+    RsaPublicKey::from_pkcs1_der(&der)
+        .map_err(|e| anyhow!("Failed to parse DKIM RSA public key DER: {}", e))
+}
+
 /// Get canonicalization name
 fn canon_name(canon: Canonicalization) -> &'static str {
     match canon {
@@ -600,7 +759,10 @@ mod tests {
         let (headers, body) = split_message(message).unwrap();
 
         assert_eq!(headers.get("from"), Some(&"sender@example.com".to_string()));
-        assert_eq!(headers.get("to"), Some(&"recipient@example.com".to_string()));
+        assert_eq!(
+            headers.get("to"),
+            Some(&"recipient@example.com".to_string())
+        );
         assert_eq!(headers.get("subject"), Some(&"Test".to_string()));
         assert_eq!(body, "This is the body.");
     }
@@ -610,5 +772,24 @@ mod tests {
         assert_eq!(DkimResult::Pass.as_header_value(), "pass");
         assert_eq!(DkimResult::Fail.as_header_value(), "fail");
         assert_eq!(DkimResult::None.as_header_value(), "none");
+    }
+
+    #[test]
+    fn test_parse_canonicalization() {
+        assert_eq!(
+            parse_canonicalization("relaxed/relaxed"),
+            (Canonicalization::Relaxed, Canonicalization::Relaxed)
+        );
+        assert_eq!(
+            parse_canonicalization("relaxed"),
+            (Canonicalization::Relaxed, Canonicalization::Simple)
+        );
+    }
+
+    #[test]
+    fn test_strip_dkim_signature_value() {
+        let header = "v=1; a=rsa-sha256; bh=abc; b=Zm9vYmFy; h=from:to";
+        let stripped = strip_dkim_signature_value(header).unwrap();
+        assert_eq!(stripped, "v=1; a=rsa-sha256; bh=abc; b=; h=from:to");
     }
 }
