@@ -154,6 +154,8 @@ pub struct Plugin {
     pub endpoint: Option<String>,
     pub permissions: serde_json::Value,
     pub enabled: bool,
+    /// HMAC signing secret for webhook payload integrity verification
+    pub webhook_secret: Option<String>,
     pub installed_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

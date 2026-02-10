@@ -89,15 +89,21 @@ impl SmtpAuthenticator {
 
     /// Authenticate using LOGIN mechanism (after receiving both username and password)
     pub async fn authenticate_login(&self, username: &str, password: &str) -> AuthResult {
-        // Both username and password should be base64 encoded
+        // Both username and password MUST be base64 encoded per RFC 4616
         let username = match BASE64.decode(username.trim()) {
             Ok(d) => String::from_utf8_lossy(&d).to_string(),
-            Err(_) => username.to_string(), // Try as plain text
+            Err(e) => {
+                warn!("AUTH LOGIN: Invalid base64 username: {}", e);
+                return AuthResult::failure("Invalid credentials encoding");
+            }
         };
 
         let password = match BASE64.decode(password.trim()) {
             Ok(d) => String::from_utf8_lossy(&d).to_string(),
-            Err(_) => password.to_string(), // Try as plain text
+            Err(e) => {
+                warn!("AUTH LOGIN: Invalid base64 password: {}", e);
+                return AuthResult::failure("Invalid credentials encoding");
+            }
         };
 
         debug!("AUTH LOGIN: Attempting authentication for user: {}", username);

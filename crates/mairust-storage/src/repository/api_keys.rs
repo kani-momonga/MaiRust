@@ -82,6 +82,8 @@ impl ApiKeyRepository for DbApiKeyRepository {
                    expires_at, last_used_at, created_at
             FROM api_keys
             WHERE key_prefix = $1
+              AND (expires_at IS NULL OR expires_at > NOW())
+            LIMIT 10
             "#,
         )
         .bind(prefix)

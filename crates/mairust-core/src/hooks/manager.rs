@@ -2,18 +2,24 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use mairust_common::types::{HookAction, HookResult, HookType};
 use mairust_storage::db::DatabasePool;
 use mairust_storage::models::{Hook, Message, Plugin};
 use mairust_storage::repository::HookRepository;
 use reqwest::Client;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Circuit breaker state for a plugin
 #[derive(Debug, Clone)]
@@ -268,17 +274,35 @@ impl HookManager {
             metadata: hook.config.clone(),
         };
 
+        // Validate endpoint URL to prevent SSRF
+        validate_webhook_url(endpoint)?;
+
         // Calculate timeout
         let timeout = Duration::from_millis(hook.timeout_ms as u64);
 
-        // Make HTTP request
-        let response = self
+        // Serialize request body for HMAC signing
+        let request_body = serde_json::to_vec(&request)?;
+
+        // Build request with optional HMAC signature
+        let mut http_request = self
             .http_client
             .post(endpoint)
-            .json(&request)
-            .timeout(timeout)
-            .send()
-            .await?;
+            .header("Content-Type", "application/json")
+            .timeout(timeout);
+
+        // Add HMAC-SHA256 signature if plugin has a webhook secret
+        if let Some(ref secret) = plugin.webhook_secret {
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Invalid HMAC key: {}", e))?;
+            mac.update(&request_body);
+            let signature = hex::encode(mac.finalize().into_bytes());
+            http_request = http_request.header(
+                "X-Webhook-Signature",
+                format!("sha256={}", signature),
+            );
+        }
+
+        let response = http_request.body(request_body).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -416,6 +440,79 @@ impl HookManager {
         } else {
             // Use maximum score
             Some(scores.iter().cloned().fold(f64::MIN, f64::max))
+        }
+    }
+}
+
+/// Validate a webhook URL to prevent SSRF attacks.
+///
+/// Rejects URLs targeting private/internal IP ranges, loopback addresses,
+/// link-local addresses, and non-HTTP(S) schemes.
+fn validate_webhook_url(url_str: &str) -> Result<()> {
+    let url = Url::parse(url_str)
+        .map_err(|e| anyhow::anyhow!("Invalid webhook URL: {}", e))?;
+
+    // Only allow HTTP and HTTPS schemes
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(anyhow::anyhow!(
+                "Webhook URL scheme '{}' is not allowed. Only http and https are permitted.",
+                scheme
+            ));
+        }
+    }
+
+    // Resolve the hostname to check for private IP ranges
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Webhook URL has no host"))?;
+
+    // Block obviously internal hostnames
+    let lower_host = host.to_lowercase();
+    if lower_host == "localhost"
+        || lower_host.ends_with(".local")
+        || lower_host.ends_with(".internal")
+        || lower_host == "metadata.google.internal"
+        || lower_host == "169.254.169.254"
+    {
+        return Err(anyhow::anyhow!(
+            "Webhook URL host '{}' is not allowed (internal/private address)",
+            host
+        ));
+    }
+
+    // Check if the host is an IP address and block private ranges
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip(&ip) {
+            return Err(anyhow::anyhow!(
+                "Webhook URL IP '{}' is not allowed (private/internal range)",
+                ip
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address is in a private/reserved range
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()              // 127.0.0.0/8
+                || ipv4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || ipv4.is_link_local()      // 169.254.0.0/16
+                || ipv4.is_broadcast()       // 255.255.255.255
+                || ipv4.is_unspecified()      // 0.0.0.0
+                || ipv4.octets()[0] == 100 && (ipv4.octets()[1] & 0xC0) == 64  // 100.64.0.0/10 (CGNAT)
+        }
+        IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()              // ::1
+                || ipv6.is_unspecified()     // ::
+                // fc00::/7 (ULA)
+                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+                // fe80::/10 (link-local)
+                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
         }
     }
 }

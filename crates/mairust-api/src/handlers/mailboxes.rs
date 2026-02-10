@@ -235,7 +235,11 @@ pub async fn create_mailbox(
 
     let repo = MailboxRepository::new(state.db_pool.clone());
 
-    // Check if address already exists
+    // Check if address already exists (global uniqueness - email addresses are globally unique)
+    if let Ok(Some(_)) = repo.find_by_address_for_tenant(tenant_id, &input.address).await {
+        return Err(StatusCode::CONFLICT);
+    }
+    // Also check globally to prevent duplicate addresses across tenants
     if let Ok(Some(_)) = repo.get_by_address(&input.address).await {
         return Err(StatusCode::CONFLICT);
     }

@@ -29,13 +29,29 @@ impl DbDomainRepository {
         Self { pool }
     }
 
-    /// Find domain by name (for SMTP handler)
+    /// Find domain by name (for SMTP handler - cross-tenant lookup required for mail routing)
     pub async fn find_by_name(&self, name: &str) -> Result<Option<Domain>> {
         sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE name = $1")
             .bind(name)
             .fetch_optional(self.pool.pool())
             .await
             .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Find domain by name within a specific tenant (for API handlers)
+    pub async fn find_by_name_for_tenant(
+        &self,
+        tenant_id: TenantId,
+        name: &str,
+    ) -> Result<Option<Domain>> {
+        sqlx::query_as::<_, Domain>(
+            "SELECT * FROM domains WHERE tenant_id = $1 AND name = $2",
+        )
+        .bind(tenant_id)
+        .bind(name)
+        .fetch_optional(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
     }
 }
 
