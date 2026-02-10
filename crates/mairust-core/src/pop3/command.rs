@@ -7,38 +7,60 @@
 pub enum Pop3Command {
     // Authorization state commands
     /// USER username - Identify user
-    User { username: String },
+    User {
+        username: String,
+    },
     /// PASS password - Provide password
-    Pass { password: String },
+    Pass {
+        password: String,
+    },
     /// APOP name digest - Alternative authentication (MD5)
-    Apop { name: String, digest: String },
+    Apop {
+        name: String,
+        digest: String,
+    },
 
     // Transaction state commands
     /// STAT - Get mailbox status
     Stat,
     /// LIST [msg] - List messages
-    List { msg: Option<u32> },
+    List {
+        msg: Option<u32>,
+    },
     /// RETR msg - Retrieve message
-    Retr { msg: u32 },
+    Retr {
+        msg: u32,
+    },
     /// DELE msg - Mark message for deletion
-    Dele { msg: u32 },
+    Dele {
+        msg: u32,
+    },
     /// NOOP - No operation
     Noop,
     /// RSET - Reset (unmark all deletions)
     Rset,
     /// TOP msg n - Get message headers and first n lines
-    Top { msg: u32, lines: u32 },
+    Top {
+        msg: u32,
+        lines: u32,
+    },
     /// UIDL [msg] - Get unique ID listing
-    Uidl { msg: Option<u32> },
+    Uidl {
+        msg: Option<u32>,
+    },
 
     // Any state commands
     /// QUIT - End session
     Quit,
     /// CAPA - Get server capabilities
     Capa,
+    /// STLS - Switch to TLS mode
+    Stls,
 
     // Unknown command
-    Unknown { command: String },
+    Unknown {
+        command: String,
+    },
 }
 
 /// POP3 Command Parser
@@ -49,7 +71,9 @@ impl Pop3Parser {
     pub fn parse(line: &str) -> Pop3Command {
         let line = line.trim();
         if line.is_empty() {
-            return Pop3Command::Unknown { command: String::new() };
+            return Pop3Command::Unknown {
+                command: String::new(),
+            };
         }
 
         let parts: Vec<&str> = line.splitn(2, ' ').collect();
@@ -57,8 +81,12 @@ impl Pop3Parser {
         let args = if parts.len() > 1 { parts[1].trim() } else { "" };
 
         match cmd.as_str() {
-            "USER" => Pop3Command::User { username: args.to_string() },
-            "PASS" => Pop3Command::Pass { password: args.to_string() },
+            "USER" => Pop3Command::User {
+                username: args.to_string(),
+            },
+            "PASS" => Pop3Command::Pass {
+                password: args.to_string(),
+            },
             "APOP" => {
                 let parts: Vec<&str> = args.splitn(2, ' ').collect();
                 if parts.len() == 2 {
@@ -117,6 +145,7 @@ impl Pop3Parser {
             }
             "QUIT" => Pop3Command::Quit,
             "CAPA" => Pop3Command::Capa,
+            "STLS" => Pop3Command::Stls,
             _ => Pop3Command::Unknown { command: cmd },
         }
     }
@@ -193,5 +222,15 @@ mod tests {
             Pop3Command::Uidl { msg } => assert!(msg.is_none()),
             _ => panic!("Expected UIDL command"),
         }
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_stls() {
+        assert!(matches!(Pop3Parser::parse("STLS"), Pop3Command::Stls));
     }
 }

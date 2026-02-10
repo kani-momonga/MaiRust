@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
             max_connections: config.imap.max_connections,
             storage_path: config.storage.path.clone(),
         };
-        let imap_server = ImapServer::new(imap_config, db_pool.clone());
+        let imap_server = ImapServer::with_tls(imap_config, db_pool.clone(), config.tls.as_ref());
         info!("Starting IMAP server on {}", config.imap.bind);
 
         Some(tokio::spawn(async move {
@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
             server_name: config.server.hostname.clone(),
             storage_path: config.storage.path.clone(),
         };
-        let pop3_server = Pop3Server::new(pop3_config, db_pool.clone());
+        let pop3_server = Pop3Server::with_tls(pop3_config, db_pool.clone(), config.tls.as_ref());
         info!("Starting POP3 server on {}", config.pop3.bind);
 
         Some(tokio::spawn(async move {
@@ -203,8 +203,8 @@ async fn main() -> Result<()> {
 }
 
 fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,mairust=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mairust=debug"));
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(true).with_level(true))

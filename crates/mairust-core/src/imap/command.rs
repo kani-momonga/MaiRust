@@ -30,7 +30,8 @@ impl SequenceSet {
         // Check for comma-separated sets
         if s.contains(',') {
             let parts: Vec<&str> = s.split(',').collect();
-            let sets: Vec<SequenceSet> = parts.iter().filter_map(|p| Self::parse(p.trim())).collect();
+            let sets: Vec<SequenceSet> =
+                parts.iter().filter_map(|p| Self::parse(p.trim())).collect();
             if sets.is_empty() {
                 return None;
             }
@@ -97,9 +98,15 @@ pub enum FetchItem {
     /// Full body (UID optional)
     Body,
     /// Body section
-    BodySection { section: String, partial: Option<(u32, u32)> },
+    BodySection {
+        section: String,
+        partial: Option<(u32, u32)>,
+    },
     /// BODY.PEEK section (doesn't set \Seen flag)
-    BodyPeek { section: String, partial: Option<(u32, u32)> },
+    BodyPeek {
+        section: String,
+        partial: Option<(u32, u32)>,
+    },
     /// UID
     Uid,
     /// All standard attributes (FLAGS, INTERNALDATE, RFC822.SIZE, ENVELOPE)
@@ -126,15 +133,18 @@ impl FetchItem {
             "FAST" => Some(FetchItem::Fast),
             "FULL" => Some(FetchItem::Full),
             _ if s.starts_with("BODY.PEEK[") => {
-                let section = s
-                    .strip_prefix("BODY.PEEK[")?
-                    .strip_suffix(']')?
-                    .to_string();
-                Some(FetchItem::BodyPeek { section, partial: None })
+                let section = s.strip_prefix("BODY.PEEK[")?.strip_suffix(']')?.to_string();
+                Some(FetchItem::BodyPeek {
+                    section,
+                    partial: None,
+                })
             }
             _ if s.starts_with("BODY[") => {
                 let section = s.strip_prefix("BODY[")?.strip_suffix(']')?.to_string();
-                Some(FetchItem::BodySection { section, partial: None })
+                Some(FetchItem::BodySection {
+                    section,
+                    partial: None,
+                })
             }
             _ => None,
         }
@@ -287,32 +297,87 @@ pub enum ImapCommand {
     Capability,
     Noop,
     Logout,
+    StartTls,
 
     // Not authenticated state
-    Login { username: String, password: String },
-    Authenticate { mechanism: String, initial_response: Option<String> },
+    Login {
+        username: String,
+        password: String,
+    },
+    Authenticate {
+        mechanism: String,
+        initial_response: Option<String>,
+    },
 
     // Authenticated state
-    Select { mailbox: String },
-    Examine { mailbox: String },
-    Create { mailbox: String },
-    Delete { mailbox: String },
-    Rename { old_mailbox: String, new_mailbox: String },
-    Subscribe { mailbox: String },
-    Unsubscribe { mailbox: String },
-    List { reference: String, pattern: String },
-    Lsub { reference: String, pattern: String },
-    Status { mailbox: String, items: Vec<String> },
-    Append { mailbox: String, flags: Vec<String>, date: Option<String>, message: Vec<u8> },
+    Select {
+        mailbox: String,
+    },
+    Examine {
+        mailbox: String,
+    },
+    Create {
+        mailbox: String,
+    },
+    Delete {
+        mailbox: String,
+    },
+    Rename {
+        old_mailbox: String,
+        new_mailbox: String,
+    },
+    Subscribe {
+        mailbox: String,
+    },
+    Unsubscribe {
+        mailbox: String,
+    },
+    List {
+        reference: String,
+        pattern: String,
+    },
+    Lsub {
+        reference: String,
+        pattern: String,
+    },
+    Status {
+        mailbox: String,
+        items: Vec<String>,
+    },
+    Append {
+        mailbox: String,
+        flags: Vec<String>,
+        date: Option<String>,
+        message: Vec<u8>,
+    },
     Close,
 
     // Selected state
     Check,
-    Fetch { sequence: SequenceSet, items: Vec<FetchItem>, uid: bool },
-    Search { criteria: SearchCriteria, uid: bool },
-    Store { sequence: SequenceSet, flags: StoreFlags, uid: bool },
-    Copy { sequence: SequenceSet, mailbox: String, uid: bool },
-    Move { sequence: SequenceSet, mailbox: String, uid: bool },
+    Fetch {
+        sequence: SequenceSet,
+        items: Vec<FetchItem>,
+        uid: bool,
+    },
+    Search {
+        criteria: SearchCriteria,
+        uid: bool,
+    },
+    Store {
+        sequence: SequenceSet,
+        flags: StoreFlags,
+        uid: bool,
+    },
+    Copy {
+        sequence: SequenceSet,
+        mailbox: String,
+        uid: bool,
+    },
+    Move {
+        sequence: SequenceSet,
+        mailbox: String,
+        uid: bool,
+    },
     Expunge,
 
     // Extensions
@@ -323,7 +388,9 @@ pub enum ImapCommand {
     // UID variants are handled via uid flag in Fetch/Search/Store/Copy/Move
 
     // Unknown command
-    Unknown { command: String },
+    Unknown {
+        command: String,
+    },
 }
 
 /// Parsed IMAP command with tag
