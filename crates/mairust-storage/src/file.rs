@@ -61,9 +61,61 @@ impl LocalStorage {
         })
     }
 
-    /// Get full path for a relative path
-    fn full_path(&self, path: &str) -> PathBuf {
-        self.base_path.join(path)
+    /// Get full path for a relative path, with path traversal protection
+    fn full_path(&self, path: &str) -> std::result::Result<PathBuf, Error> {
+        // Reject paths containing traversal sequences
+        if path.contains("..") {
+            return Err(Error::Storage(
+                "Path traversal detected: '..' is not allowed".to_string(),
+            ));
+        }
+
+        // Reject absolute paths
+        if path.starts_with('/') || path.starts_with('\\') {
+            return Err(Error::Storage(
+                "Absolute paths are not allowed".to_string(),
+            ));
+        }
+
+        let full = self.base_path.join(path);
+
+        // Canonicalize and verify the path stays within base_path
+        // For new files, check the parent directory
+        let canonical_base = self
+            .base_path
+            .canonicalize()
+            .map_err(|e| Error::Storage(format!("Failed to canonicalize base path: {}", e)))?;
+
+        // If the full path exists, canonicalize it directly
+        // Otherwise, canonicalize the parent and append the filename
+        let canonical_full = if full.exists() {
+            full.canonicalize()
+                .map_err(|e| Error::Storage(format!("Failed to canonicalize path: {}", e)))?
+        } else if let Some(parent) = full.parent() {
+            if parent.exists() {
+                let canonical_parent = parent.canonicalize().map_err(|e| {
+                    Error::Storage(format!("Failed to canonicalize parent path: {}", e))
+                })?;
+                if let Some(filename) = full.file_name() {
+                    canonical_parent.join(filename)
+                } else {
+                    return Err(Error::Storage("Invalid file path".to_string()));
+                }
+            } else {
+                // Parent doesn't exist yet (will be created), verify path components
+                full.clone()
+            }
+        } else {
+            full.clone()
+        };
+
+        if !canonical_full.starts_with(&canonical_base) {
+            return Err(Error::Storage(
+                "Path traversal detected: resolved path is outside storage directory".to_string(),
+            ));
+        }
+
+        Ok(full)
     }
 
     /// Ensure parent directory exists
@@ -80,7 +132,7 @@ impl LocalStorage {
 #[async_trait]
 impl FileStorage for LocalStorage {
     async fn store(&self, path: &str, data: &[u8]) -> Result<String> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
         self.ensure_parent_exists(&full_path).await?;
 
         let mut file = fs::File::create(&full_path)
@@ -97,7 +149,7 @@ impl FileStorage for LocalStorage {
     }
 
     async fn read(&self, path: &str) -> Result<Vec<u8>> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
 
         let mut file = fs::File::open(&full_path)
             .await
@@ -114,7 +166,7 @@ impl FileStorage for LocalStorage {
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
 
         fs::remove_file(&full_path)
             .await
@@ -126,12 +178,12 @@ impl FileStorage for LocalStorage {
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
         Ok(full_path.exists())
     }
 
     async fn size(&self, path: &str) -> Result<u64> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
 
         let metadata = fs::metadata(&full_path)
             .await
@@ -240,5 +292,30 @@ mod tests {
         // Test delete
         storage.delete("test/message.eml").await.unwrap();
         assert!(!storage.exists("test/message.eml").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_prevention() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            backend: "fs".to_string(),
+            path: temp_dir.path().to_path_buf(),
+            s3: None,
+        };
+
+        let storage = LocalStorage::new(&config).unwrap();
+
+        // Path traversal with .. should be rejected
+        assert!(storage.store("../../../etc/passwd", b"evil").await.is_err());
+        assert!(storage.read("../../../etc/passwd").await.is_err());
+        assert!(storage.delete("../../sensitive").await.is_err());
+        assert!(storage.exists("../outside").await.is_err());
+
+        // Absolute paths should be rejected
+        assert!(storage.store("/etc/passwd", b"evil").await.is_err());
+        assert!(storage.read("/etc/shadow").await.is_err());
+
+        // Normal paths should work
+        assert!(storage.store("safe/path/file.eml", b"ok").await.is_ok());
     }
 }

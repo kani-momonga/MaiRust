@@ -1786,6 +1786,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hex",
+ "hmac",
  "ipnet",
  "lettre",
  "mail-builder",

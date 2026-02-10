@@ -31,13 +31,29 @@ impl DbMailboxRepository {
         Self { pool }
     }
 
-    /// Find mailbox by address (for SMTP handler)
+    /// Find mailbox by address (for SMTP handler - cross-tenant lookup required for mail routing)
     pub async fn find_by_address(&self, address: &str) -> Result<Option<Mailbox>> {
         sqlx::query_as::<_, Mailbox>("SELECT * FROM mailboxes WHERE address = $1")
             .bind(address)
             .fetch_optional(self.pool.pool())
             .await
             .map_err(|e| Error::Database(e.to_string()))
+    }
+
+    /// Find mailbox by address within a specific tenant (for API handlers)
+    pub async fn find_by_address_for_tenant(
+        &self,
+        tenant_id: TenantId,
+        address: &str,
+    ) -> Result<Option<Mailbox>> {
+        sqlx::query_as::<_, Mailbox>(
+            "SELECT * FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+        )
+        .bind(tenant_id)
+        .bind(address)
+        .fetch_optional(self.pool.pool())
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
     }
 }
 

@@ -403,7 +403,11 @@ impl PolicyEngine {
             "starts_with" => value.starts_with(&expected_str),
             "ends_with" => value.ends_with(&expected_str),
             "regex" => {
-                if let Ok(re) = regex::Regex::new(&expected_str) {
+                // Use size limit to prevent ReDoS from user-supplied patterns
+                if let Ok(re) = regex::RegexBuilder::new(&expected_str)
+                    .size_limit(1 << 20) // 1MB compiled size limit
+                    .build()
+                {
                     re.is_match(&value)
                 } else {
                     false
@@ -470,7 +474,11 @@ impl PolicyEngine {
                 values.iter().any(|v| v.to_lowercase().starts_with(&expected_str))
             }
             "any_regex" | "regex" => {
-                if let Ok(re) = regex::Regex::new(&expected_str) {
+                // Use size limit to prevent ReDoS from user-supplied patterns
+                if let Ok(re) = regex::RegexBuilder::new(&expected_str)
+                    .size_limit(1 << 20) // 1MB compiled size limit
+                    .build()
+                {
                     values.iter().any(|v| re.is_match(&v.to_lowercase()))
                 } else {
                     false

@@ -131,7 +131,7 @@ pub async fn create_domain_alias(
             StatusCode::BAD_REQUEST
         })?;
 
-    // Check if alias domain already exists as a domain or alias
+    // Check if alias domain already exists as a domain (global uniqueness check)
     if let Ok(Some(_)) = domain_repo.find_by_name(&input.alias_domain).await {
         warn!("Domain {} already exists", input.alias_domain);
         return Err(StatusCode::CONFLICT);

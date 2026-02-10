@@ -57,6 +57,9 @@ async-trait = "0.1"
 argon2 = { workspace = true }
 base64 = "0.22"
 
+# HMAC for webhook signatures
+hmac = { workspace = true }
+
 # Database (for queue and hooks)
 sqlx = { workspace = true }
 

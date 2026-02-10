@@ -211,10 +211,10 @@ pub async fn send_email(
         }
     }
 
-    // Verify sender mailbox belongs to tenant
+    // Verify sender mailbox belongs to tenant (tenant-scoped query)
     let mailbox_repo = MailboxRepository::new(state.db_pool.clone());
-    let sender_mailbox = mailbox_repo
-        .get_by_address(&input.from.to_lowercase())
+    let _sender_mailbox = mailbox_repo
+        .find_by_address_for_tenant(tenant_id, &input.from.to_lowercase())
         .await
         .map_err(|_| {
             (
@@ -230,20 +230,11 @@ pub async fn send_email(
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
                     error: "forbidden".to_string(),
-                    message: "Sender address not found or not authorized".to_string(),
+                    message: "Sender address not found or not authorized for this tenant"
+                        .to_string(),
                 }),
             )
         })?;
-
-    if sender_mailbox.tenant_id != tenant_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "forbidden".to_string(),
-                message: "Sender address does not belong to this tenant".to_string(),
-            }),
-        ));
-    }
 
     // Generate message ID
     let message_id = Uuid::now_v7();

@@ -1305,6 +1305,11 @@ impl ImapServer {
             None => return ImapResponse::no(tag, "No tenant context"),
         };
 
+        let user_id = match sess.user_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No user context"),
+        };
+
         let selected = match &sess.selected_mailbox {
             Some(s) => s.clone(),
             None => return ImapResponse::no(tag, "No mailbox selected"),
@@ -1313,17 +1318,19 @@ impl ImapServer {
 
         let pool = db_pool.pool();
 
-        // Find destination mailbox
+        // Find destination mailbox (filtered by tenant_id AND user_id to prevent cross-user access)
         let dest_mailbox_query = if dest_mailbox.to_uppercase() == "INBOX" {
             sqlx::query_as::<_, (Uuid,)>(
-                "SELECT id FROM mailboxes WHERE tenant_id = $1 LIMIT 1",
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 LIMIT 1",
             )
             .bind(tenant_id)
+            .bind(user_id)
         } else {
             sqlx::query_as::<_, (Uuid,)>(
-                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 AND address = $3",
             )
             .bind(tenant_id)
+            .bind(user_id)
             .bind(dest_mailbox)
         };
 
@@ -1429,6 +1436,11 @@ impl ImapServer {
             None => return ImapResponse::no(tag, "No tenant context"),
         };
 
+        let user_id = match sess.user_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No user context"),
+        };
+
         let selected = match &sess.selected_mailbox {
             Some(s) => s.clone(),
             None => return ImapResponse::no(tag, "No mailbox selected"),
@@ -1437,17 +1449,19 @@ impl ImapServer {
 
         let pool = db_pool.pool();
 
-        // Find destination mailbox
+        // Find destination mailbox (filtered by tenant_id AND user_id to prevent cross-user access)
         let dest_mailbox_query = if dest_mailbox.to_uppercase() == "INBOX" {
             sqlx::query_as::<_, (Uuid,)>(
-                "SELECT id FROM mailboxes WHERE tenant_id = $1 LIMIT 1",
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 LIMIT 1",
             )
             .bind(tenant_id)
+            .bind(user_id)
         } else {
             sqlx::query_as::<_, (Uuid,)>(
-                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 AND address = $3",
             )
             .bind(tenant_id)
+            .bind(user_id)
             .bind(dest_mailbox)
         };
 
@@ -1592,6 +1606,9 @@ impl ImapServer {
         response
     }
 
+    /// Maximum APPEND message size (50MB, matching SMTP limit)
+    const MAX_APPEND_SIZE: usize = 50 * 1024 * 1024;
+
     /// Handle APPEND command
     async fn handle_append(
         tag: &str,
@@ -1603,6 +1620,18 @@ impl ImapServer {
         db_pool: &DatabasePool,
         storage_path_base: &PathBuf,
     ) -> String {
+        // Enforce message size limit to prevent disk exhaustion DoS
+        if message.len() > Self::MAX_APPEND_SIZE {
+            return ImapResponse::no(
+                tag,
+                &format!(
+                    "Message too large ({} bytes, max {} bytes)",
+                    message.len(),
+                    Self::MAX_APPEND_SIZE
+                ),
+            );
+        }
+
         let sess = session.lock().await;
         if !sess.is_authenticated() {
             return ImapResponse::no(tag, "Not authenticated");
@@ -1612,21 +1641,28 @@ impl ImapServer {
             Some(id) => id,
             None => return ImapResponse::no(tag, "No tenant context"),
         };
+
+        let user_id = match sess.user_id {
+            Some(id) => id,
+            None => return ImapResponse::no(tag, "No user context"),
+        };
         drop(sess);
 
         let pool = db_pool.pool();
 
-        // Find the mailbox
+        // Find the mailbox (filtered by tenant_id AND user_id to prevent cross-user access)
         let mailbox_query = if mailbox_name.to_uppercase() == "INBOX" {
             sqlx::query_as::<_, (Uuid,)>(
-                "SELECT id FROM mailboxes WHERE tenant_id = $1 LIMIT 1",
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 LIMIT 1",
             )
             .bind(tenant_id)
+            .bind(user_id)
         } else {
             sqlx::query_as::<_, (Uuid,)>(
-                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND address = $2",
+                "SELECT id FROM mailboxes WHERE tenant_id = $1 AND user_id = $2 AND address = $3",
             )
             .bind(tenant_id)
+            .bind(user_id)
             .bind(mailbox_name)
         };
 

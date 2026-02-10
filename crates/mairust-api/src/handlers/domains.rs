@@ -140,8 +140,13 @@ pub async fn create_domain(
 
     let repo = DomainRepository::new(state.db_pool.clone());
 
-    // Check if domain already exists
+    // Check if domain already exists (global check to prevent duplicates across tenants)
     if let Ok(Some(_)) = repo.find_by_name(&input.name).await {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Also check within tenant for safety
+    if let Ok(Some(_)) = repo.find_by_name_for_tenant(tenant_id, &input.name).await {
         return Err(StatusCode::CONFLICT);
     }
 
