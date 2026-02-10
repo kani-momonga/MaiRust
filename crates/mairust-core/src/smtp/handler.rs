@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// SMTP session state
@@ -86,52 +86,54 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
 
-        // Run the session
+        // Run plaintext phase
         let result = self
-            .run_session(&mut reader, &mut writer, false, tls_acceptor.clone())
-            .await;
+            .run_session(&mut reader, &mut writer, false, true)
+            .await?;
 
         match result {
-            Ok(Some(tcp_stream)) => {
-                // STARTTLS was requested, upgrade to TLS
-                if let Some(acceptor) = tls_acceptor {
-                    info!("Upgrading connection to TLS for {}", self.peer_addr);
-                    match acceptor.accept(tcp_stream).await {
-                        Ok(tls_stream) => {
-                            let (tls_reader, tls_writer) = tokio::io::split(tls_stream);
-                            let mut tls_reader = BufReader::new(tls_reader);
-                            let mut tls_writer = BufWriter::new(tls_writer);
+            CommandResult::Quit => Ok(()),
+            CommandResult::Continue => Ok(()),
+            CommandResult::StartTls => {
+                let acceptor = tls_acceptor.ok_or_else(|| {
+                    anyhow::anyhow!("STARTTLS requested without configured acceptor")
+                })?;
 
-                            // Continue session over TLS
-                            if let Err(e) = self
-                                .run_session(&mut tls_reader, &mut tls_writer, true, None)
-                                .await
-                            {
-                                error!("TLS session error: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            error!("TLS handshake failed for {}: {}", self.peer_addr, e);
-                        }
-                    }
-                }
+                // Make sure response is flushed before upgrading.
+                writer.flush().await?;
+
+                // Reunite stream halves so rustls can perform handshake.
+                let reader = reader.into_inner();
+                let writer = writer.into_inner();
+                let tcp_stream = reader.reunite(writer).map_err(|_| {
+                    anyhow::anyhow!("Failed to reunite TCP stream halves during STARTTLS")
+                })?;
+
+                info!("Upgrading connection to TLS for {}", self.peer_addr);
+                let tls_stream = acceptor.accept(tcp_stream).await.map_err(|e| {
+                    anyhow::anyhow!("TLS handshake failed for {}: {}", self.peer_addr, e)
+                })?;
+
+                let (tls_reader, tls_writer) = tokio::io::split(tls_stream);
+                let mut tls_reader = BufReader::new(tls_reader);
+                let mut tls_writer = BufWriter::new(tls_writer);
+
+                // Continue same SMTP session over TLS without sending a second greeting.
+                self.run_session(&mut tls_reader, &mut tls_writer, true, false)
+                    .await?;
                 Ok(())
             }
-            Ok(None) => Ok(()),
-            Err(e) => Err(e),
         }
     }
 
     /// Run the SMTP session
-    /// Returns Ok(Some(stream)) if STARTTLS was requested and we need to upgrade
-    /// Returns Ok(None) if session ended normally
     async fn run_session<R, W>(
         &self,
         reader: &mut BufReader<R>,
         writer: &mut BufWriter<W>,
         tls_established: bool,
-        _tls_acceptor: Option<Arc<TlsAcceptor>>,
-    ) -> Result<Option<TcpStream>>
+        send_greeting: bool,
+    ) -> Result<CommandResult>
     where
         R: tokio::io::AsyncRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
@@ -148,9 +150,15 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
         let mut authenticated_user: Option<User> = None;
         let authenticator = SmtpAuthenticator::new(self.db_pool.clone());
 
-        // Send greeting
-        self.send_response(writer, 220, &format!("{} ESMTP MaiRust", self.config.hostname))
+        if send_greeting {
+            // Send greeting
+            self.send_response(
+                writer,
+                220,
+                &format!("{} ESMTP MaiRust", self.config.hostname),
+            )
             .await?;
+        }
 
         let mut line = String::new();
 
@@ -188,19 +196,12 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
 
             match result {
                 CommandResult::Continue => continue,
-                CommandResult::Quit => break,
-                CommandResult::StartTls => {
-                    // STARTTLS requested - we can't return the stream here
-                    // because we don't own it anymore. The caller needs to handle this.
-                    // For now, just log and continue (full implementation would require
-                    // refactoring to pass ownership back)
-                    warn!("STARTTLS upgrade not fully implemented in this code path");
-                    break;
-                }
+                CommandResult::Quit => return Ok(CommandResult::Quit),
+                CommandResult::StartTls => return Ok(CommandResult::StartTls),
             }
         }
 
-        Ok(None)
+        Ok(CommandResult::Continue)
     }
 
     /// Process a single SMTP command
@@ -272,6 +273,12 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
 
                 if tls_established {
                     self.send_response(writer, 503, "5.5.1 TLS already active")
+                        .await?;
+                    return Ok(CommandResult::Continue);
+                }
+
+                if *state != SessionState::Greeted {
+                    self.send_response(writer, 503, "5.5.1 Send EHLO/HELO first")
                         .await?;
                     return Ok(CommandResult::Continue);
                 }
@@ -661,10 +668,7 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
             };
 
             // Store the raw message to file storage
-            let storage_path = format!(
-                "{}/{}/{}.eml",
-                mailbox.tenant_id, mailbox.id, message_id
-            );
+            let storage_path = format!("{}/{}/{}.eml", mailbox.tenant_id, mailbox.id, message_id);
 
             self.file_storage.store(&storage_path, data).await?;
 
@@ -774,10 +778,7 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
 
         // DMARC verification
         let dmarc_result = if let Some(ref from_domain) = from_domain {
-            let mail_from_domain = envelope
-                .from
-                .as_ref()
-                .map(|addr| addr.domain.clone());
+            let mail_from_domain = envelope.from.as_ref().map(|addr| addr.domain.clone());
 
             // Extract DKIM domain from the message
             let dkim_domain = self.extract_dkim_domain(message_data);
@@ -815,11 +816,13 @@ impl<S: FileStorage + Send + Sync + 'static> SmtpHandler<S> {
     fn extract_from_domain(&self, message_data: &[u8]) -> Option<String> {
         let parsed = mail_parser::MessageParser::default().parse(message_data)?;
 
-        parsed.from().and_then(|addrs| addrs.first()).and_then(|addr| {
-            addr.address().and_then(|email| {
-                email.split('@').last().map(|d| d.to_lowercase())
+        parsed
+            .from()
+            .and_then(|addrs| addrs.first())
+            .and_then(|addr| {
+                addr.address()
+                    .and_then(|email| email.split('@').last().map(|d| d.to_lowercase()))
             })
-        })
     }
 
     /// Extract the DKIM signing domain from message headers
