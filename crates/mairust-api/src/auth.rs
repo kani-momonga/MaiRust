@@ -1,5 +1,6 @@
 //! Authentication module
 
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     extract::{Request, State},
     http::StatusCode,
@@ -83,11 +84,27 @@ fn hash_api_key(api_key: &str) -> String {
     hex::encode(result)
 }
 
+/// Verify an API key against a stored hash.
+///
+/// Supports both modern Argon2 hashes (`$argon2...`) and legacy SHA-256 hex hashes
+/// for backward compatibility during migration.
+fn verify_api_key(api_key: &str, stored_hash: &str) -> bool {
+    if stored_hash.starts_with("$argon2") {
+        return PasswordHash::new(stored_hash)
+            .ok()
+            .and_then(|parsed_hash| {
+                Argon2::default()
+                    .verify_password(api_key.as_bytes(), &parsed_hash)
+                    .ok()
+            })
+            .is_some();
+    }
+
+    hash_api_key(api_key) == stored_hash
+}
+
 /// Validate an API key against the database
-async fn validate_api_key(
-    db_pool: &DatabasePool,
-    api_key: &str,
-) -> Result<ApiKey, StatusCode> {
+async fn validate_api_key(db_pool: &DatabasePool, api_key: &str) -> Result<ApiKey, StatusCode> {
     let prefix = extract_key_prefix(api_key).ok_or_else(|| {
         warn!("API key too short");
         StatusCode::UNAUTHORIZED
@@ -106,11 +123,8 @@ async fn validate_api_key(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Hash the provided key and compare
-    let key_hash = hash_api_key(api_key);
-
     for candidate in candidates {
-        if candidate.key_hash == key_hash {
+        if verify_api_key(api_key, &candidate.key_hash) {
             // Check expiration
             if candidate.is_expired() {
                 warn!("API key {} has expired", candidate.id);
@@ -126,13 +140,48 @@ async fn validate_api_key(
                 }
             });
 
-            debug!("API key {} authenticated for tenant {}", candidate.id, candidate.tenant_id);
+            debug!(
+                "API key {} authenticated for tenant {}",
+                candidate.id, candidate.tenant_id
+            );
             return Ok(candidate);
         }
     }
 
     warn!("API key hash mismatch for prefix: {}", prefix);
     Err(StatusCode::UNAUTHORIZED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_api_key;
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    use argon2::Argon2;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn verifies_legacy_sha256_hash() {
+        let api_key = "mk_test_legacy_key";
+        let mut hasher = Sha256::new();
+        hasher.update(api_key.as_bytes());
+        let legacy_hash = hex::encode(hasher.finalize());
+
+        assert!(verify_api_key(api_key, &legacy_hash));
+        assert!(!verify_api_key("wrong_key", &legacy_hash));
+    }
+
+    #[test]
+    fn verifies_argon2_hash() {
+        let api_key = "mk_test_argon2_key";
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(api_key.as_bytes(), &salt)
+            .expect("argon2 hash generation should succeed")
+            .to_string();
+
+        assert!(verify_api_key(api_key, &hash));
+        assert!(!verify_api_key("wrong_key", &hash));
+    }
 }
 
 /// Authentication middleware
@@ -176,7 +225,10 @@ pub fn get_auth_context(req: &Request) -> Option<&AuthContext> {
 
 /// Check if the authenticated user is authorized for a specific tenant
 /// Returns an error if not authorized
-pub fn require_tenant_access(auth_context: &AuthContext, tenant_id: TenantId) -> Result<(), StatusCode> {
+pub fn require_tenant_access(
+    auth_context: &AuthContext,
+    tenant_id: TenantId,
+) -> Result<(), StatusCode> {
     if !auth_context.is_authorized_for_tenant(tenant_id) {
         warn!(
             "Tenant access denied: API key tenant {} tried to access tenant {}",
