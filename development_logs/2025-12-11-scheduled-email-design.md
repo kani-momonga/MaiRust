@@ -1,7 +1,7 @@
 # Scheduled Email Sending Feature - Design Implementation Report
 
 ## Date
-2024-12-11
+2025-12-11
 
 ## Summary
 スケジュールメール送信機能の設計を完了しました。メールマガジン配信、配信リスト管理、レート制限付き分散配信などの機能を設計し、設計ドキュメントを作成しました。
